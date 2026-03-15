@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: voicr-linux-x86_64
+
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: voicr-macos-arm64
+
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: voicr-macos-x86_64
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: voicr-windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
+
+      # Linux: ALSA headers (required by cpal)
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Rename the binary to the artifact name
+      - name: Rename binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/voicr ${{ matrix.artifact }}
+          chmod +x ${{ matrix.artifact }}
+
+      - name: Rename binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cp target/${{ matrix.target }}/release/voicr.exe ${{ matrix.artifact }}.exe
+
+      - name: Upload artifact (Unix)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+      - name: Upload artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.exe
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "voicr ${{ github.ref_name }}"
+          body: |
+            ## Installation
+
+            Download the binary for your platform, make it executable, and place it somewhere in your `$PATH`.
+
+            ### Linux (x86_64)
+            ```bash
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/voicr-linux-x86_64 -o voicr
+            chmod +x voicr
+            sudo mv voicr /usr/local/bin/
+            ```
+
+            ### macOS (Apple Silicon)
+            ```bash
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/voicr-macos-arm64 -o voicr
+            chmod +x voicr
+            sudo mv voicr /usr/local/bin/
+            ```
+
+            ### macOS (Intel)
+            ```bash
+            curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/voicr-macos-x86_64 -o voicr
+            chmod +x voicr
+            sudo mv voicr /usr/local/bin/
+            ```
+
+            ### Windows (x86_64)
+            Download `voicr-windows-x86_64.exe`, rename to `voicr.exe`, and add to a folder in your `%PATH%`.
+
+            > **Note:** Daemon mode (`voicr daemon`) requires Linux or macOS.
+
+            ## Usage
+            ```
+            voicr model download moonshine-base   # download a model
+            voicr daemon                          # start background daemon
+            voicr send toggle                     # start/stop recording
+            voicr transcribe                      # one-shot transcription
+            voicr --help                          # full help
+            ```
+          files: |
+            artifacts/voicr-linux-x86_64/voicr-linux-x86_64
+            artifacts/voicr-macos-arm64/voicr-macos-arm64
+            artifacts/voicr-macos-x86_64/voicr-macos-x86_64
+            artifacts/voicr-windows-x86_64/voicr-windows-x86_64.exe
+          draft: false
+          prerelease: false
