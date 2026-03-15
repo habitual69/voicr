@@ -11,7 +11,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, ConfigCommands, HistoryCommands, ModelCommands};
 use config::Config;
-use log::{error, info};
+use log::error;
 use managers::model::ModelManager;
 use std::sync::{Arc, Mutex};
 
@@ -121,9 +121,6 @@ async fn cmd_transcribe(
     no_vad: bool,
     auto_stop: bool,
 ) -> Result<()> {
-    use audio_toolkit::{vad::SmoothedVad, AudioRecorder, SileroVad};
-    use cpal::traits::DeviceTrait;
-
     let model_manager = Arc::new(build_model_manager(config.clone(), false)?);
 
     // Ensure VAD model
@@ -224,7 +221,7 @@ fn record_from_microphone(
     config: &Arc<Mutex<Config>>,
     vad_path: Option<&std::path::Path>,
     duration: u64,
-    auto_stop: bool,
+    _auto_stop: bool,
 ) -> Result<Vec<f32>> {
     use audio_toolkit::{vad::SmoothedVad, AudioRecorder, SileroVad};
 

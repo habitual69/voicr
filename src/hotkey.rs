@@ -180,8 +180,11 @@ fn trigger_str_to_evdev(s: &str) -> Option<evdev::Key> {
 
 // ── evdev global hotkey listener (Linux) ─────────────────────────────────────
 
+/// Hold-to-talk signal: `true` = key pressed (start), `false` = key released (stop).
+pub type HotkeySignal = bool;
+
 #[cfg(target_os = "linux")]
-fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<()>) -> bool {
+fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) -> bool {
     use evdev::{InputEventKind, Key as EK};
 
     let evdev_trigger = match trigger_str_to_evdev(&hotkey.trigger_str) {
@@ -192,6 +195,16 @@ fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<()>) -> bool {
     // Find keyboard devices (those that have letter keys)
     let keyboards: Vec<evdev::Device> = evdev::enumerate()
         .filter_map(|(_, dev)| {
+            // Skip virtual/uinput keyboards (ydotoold, voicr-paste, dotool, etc.)
+            let name = dev.name().unwrap_or("").to_lowercase();
+            if name.contains("virtual")
+                || name.contains("ydotool")
+                || name.contains("dotool")
+                || name.contains("voicr")
+                || name.contains("uinput")
+            {
+                return None;
+            }
             if dev
                 .supported_keys()
                 .map(|k| k.contains(EK::KEY_A))
@@ -205,21 +218,26 @@ fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<()>) -> bool {
         .collect();
 
     if keyboards.is_empty() {
-        return false; // no access to input devices
+        return false;
     }
+
+    // Shared modifier state across ALL keyboard devices.
+    let ctrl = Arc::new(AtomicBool::new(false));
+    let alt = Arc::new(AtomicBool::new(false));
+    let shift = Arc::new(AtomicBool::new(false));
+    let meta = Arc::new(AtomicBool::new(false));
+    // Track whether the hotkey combo is currently active (held down)
+    let combo_active = Arc::new(AtomicBool::new(false));
 
     let hk = hotkey.clone();
     for mut device in keyboards {
         let tx2 = tx.clone();
         let hk2 = hk.clone();
         let trigger2 = evdev_trigger;
+        let (c, a, s, m) = (ctrl.clone(), alt.clone(), shift.clone(), meta.clone());
+        let active = combo_active.clone();
 
         std::thread::spawn(move || {
-            let mut ctrl = false;
-            let mut alt = false;
-            let mut shift = false;
-            let mut meta = false;
-
             loop {
                 let events = match device.fetch_events() {
                     Ok(e) => e,
@@ -232,28 +250,38 @@ fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<()>) -> bool {
 
                         match key {
                             EK::KEY_LEFTCTRL | EK::KEY_RIGHTCTRL => {
-                                ctrl = if press { true } else if release { false } else { ctrl }
+                                if press { c.store(true, Ordering::Relaxed); }
+                                else if release { c.store(false, Ordering::Relaxed); }
                             }
                             EK::KEY_LEFTALT | EK::KEY_RIGHTALT => {
-                                alt = if press { true } else if release { false } else { alt }
+                                if press { a.store(true, Ordering::Relaxed); }
+                                else if release { a.store(false, Ordering::Relaxed); }
                             }
                             EK::KEY_LEFTSHIFT | EK::KEY_RIGHTSHIFT => {
-                                shift = if press { true } else if release { false } else { shift }
+                                if press { s.store(true, Ordering::Relaxed); }
+                                else if release { s.store(false, Ordering::Relaxed); }
                             }
                             EK::KEY_LEFTMETA | EK::KEY_RIGHTMETA => {
-                                meta = if press { true } else if release { false } else { meta }
+                                if press { m.store(true, Ordering::Relaxed); }
+                                else if release { m.store(false, Ordering::Relaxed); }
                             }
                             _ => {}
                         }
 
+                        // Hold-to-talk: trigger key pressed with modifiers → start
                         if press && key == trigger2 {
-                            let ok = (!hk2.need_ctrl || ctrl)
-                                && (!hk2.need_alt || alt)
-                                && (!hk2.need_shift || shift)
-                                && (!hk2.need_meta || meta);
-                            if ok {
-                                let _ = tx2.send(());
+                            let ok = (!hk2.need_ctrl || c.load(Ordering::Relaxed))
+                                && (!hk2.need_alt || a.load(Ordering::Relaxed))
+                                && (!hk2.need_shift || s.load(Ordering::Relaxed))
+                                && (!hk2.need_meta || m.load(Ordering::Relaxed));
+                            if ok && !active.swap(true, Ordering::Relaxed) {
+                                let _ = tx2.send(true); // start recording
                             }
+                        }
+
+                        // Trigger key released → stop
+                        if release && key == trigger2 && active.swap(false, Ordering::Relaxed) {
+                            let _ = tx2.send(false); // stop recording
                         }
                     }
                 }
@@ -272,14 +300,241 @@ pub fn paste_text(text: &str, append_trailing_space: bool) -> Result<()> {
         text.to_string()
     };
 
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
-    clipboard
-        .set_text(&pasted)
-        .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
+    #[cfg(target_os = "linux")]
+    return paste_linux(&pasted);
 
-    std::thread::sleep(std::time::Duration::from_millis(80));
-    simulate_paste()
+    #[cfg(target_os = "macos")]
+    return paste_macos(&pasted);
+
+    #[cfg(target_os = "windows")]
+    return paste_windows(&pasted);
+
+    #[allow(unreachable_code)]
+    Err(anyhow::anyhow!("paste not supported on this platform"))
+}
+
+/// Linux paste — same fallback chain used by Handy:
+///   1. dotool   stdin pipe, no daemon, uinput-based, works everywhere
+///   2. ydotool  uinput via daemon, works everywhere incl. GNOME Wayland
+///   3. wtype    Wayland virtual keyboard (wlroots: sway/hyprland, NOT GNOME)
+///   4. xdotool  X11 / XWayland
+///   5. clipboard — last resort, user pastes manually
+///   6. clipboard only — user pastes manually
+#[cfg(target_os = "linux")]
+fn paste_linux(text: &str) -> Result<()> {
+    // 1. dotool — no daemon, uinput, reads from stdin
+    if type_text_dotool(text) {
+        eprintln!("[paste] via dotool");
+        return Ok(());
+    }
+
+    // 2. ydotool — uinput via daemon (auto-started)
+    if type_text_ydotool(text) {
+        eprintln!("[paste] via ydotool");
+        return Ok(());
+    }
+
+    // 3. wtype — Wayland virtual keyboard (wlroots only, not GNOME)
+    if type_text_wtype(text) {
+        eprintln!("[paste] via wtype");
+        return Ok(());
+    }
+
+    // 4. xdotool — X11 / XWayland
+    if type_text_xdotool(text) {
+        eprintln!("[paste] via xdotool");
+        return Ok(());
+    }
+
+    // 5. clipboard only
+    set_clipboard_linux(text)?;
+    eprintln!("[paste] clipboard only — press Ctrl+V to paste (no typing tool available)");
+    Ok(())
+}
+
+/// Type via dotool (stdin pipe, no daemon needed, uses /dev/uinput).
+/// `echo "type hello" | dotool`
+#[cfg(target_os = "linux")]
+fn type_text_dotool(text: &str) -> bool {
+    use std::io::Write;
+    if !crate::setup::cmd_exists("dotool") {
+        return false;
+    }
+    let Ok(mut child) = std::process::Command::new("dotool")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // dotool protocol: "type <text>\n"
+        let _ = writeln!(stdin, "type {}", text);
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Type via ydotool (uinput daemon). Auto-starts ydotoold if needed.
+#[cfg(target_os = "linux")]
+fn type_text_ydotool(text: &str) -> bool {
+    if !crate::setup::cmd_exists("ydotool") {
+        return false;
+    }
+    let _ = ensure_ydotoold();
+    let out = std::process::Command::new("ydotool")
+        .args(["type", "--"])
+        .arg(text)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            if !err.is_empty() {
+                eprintln!("[paste] ydotool error: {}", err.trim());
+            }
+            false
+        }
+        Err(e) => {
+            eprintln!("[paste] ydotool failed: {}", e);
+            false
+        }
+    }
+}
+
+/// Return the full path to ydotoold, searching common install locations.
+#[cfg(target_os = "linux")]
+fn find_ydotoold() -> Option<std::path::PathBuf> {
+    let candidates = [
+        "/usr/bin/ydotoold",
+        "/usr/local/bin/ydotoold",
+        "/usr/sbin/ydotoold",
+        "/usr/local/sbin/ydotoold",
+    ];
+    for p in &candidates {
+        if std::path::Path::new(p).exists() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    // Also try PATH-based lookup
+    if let Ok(out) = std::process::Command::new("which")
+        .arg("ydotoold")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        if out.status.success() {
+            let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(std::path::PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
+/// Start ydotoold daemon if not already running.
+/// Returns true if the daemon is running after this call.
+#[cfg(target_os = "linux")]
+pub fn ensure_ydotoold() -> bool {
+    let running = std::process::Command::new("pgrep")
+        .args(["-x", "ydotoold"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if running {
+        return true;
+    }
+
+    let Some(bin) = find_ydotoold() else {
+        return false;
+    };
+
+    eprintln!("[paste] starting ydotoold daemon ({})...", bin.display());
+    match std::process::Command::new(&bin)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            // Confirm it's now running
+            let ok = std::process::Command::new("pgrep")
+                .args(["-x", "ydotoold"])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                eprintln!("[paste] ydotoold daemon started");
+            } else {
+                eprintln!("[paste] ydotoold started but pgrep didn't find it (may be fine)");
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("[paste] could not start ydotoold: {}", e);
+            false
+        }
+    }
+}
+
+/// Type via wtype (Wayland virtual keyboard — wlroots compositors, NOT GNOME).
+#[cfg(target_os = "linux")]
+fn type_text_wtype(text: &str) -> bool {
+    std::process::Command::new("wtype")
+        .arg("--")
+        .arg(text)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Type via xdotool (X11 / XWayland).
+#[cfg(target_os = "linux")]
+fn type_text_xdotool(text: &str) -> bool {
+    std::process::Command::new("xdotool")
+        .args(["type", "--clearmodifiers", "--delay", "0", "--"])
+        .arg(text)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+
+/// Write text to the system clipboard on Linux.
+/// On Wayland uses wl-copy (background process handles clipboard ownership);
+/// on X11 uses arboard.
+#[cfg(target_os = "linux")]
+fn set_clipboard_linux(text: &str) -> Result<()> {
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        use std::io::Write;
+        // Spawn wl-copy; it stays alive as clipboard owner until something else pastes
+        if let Ok(mut child) = std::process::Command::new("wl-copy")
+            .arg("--")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(text.as_bytes()).ok();
+            }
+            // child keeps running in background — drop without wait
+            return Ok(());
+        }
+    }
+    // X11 or wl-copy missing: use arboard
+    let mut cb = arboard::Clipboard::new()
+        .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
+    cb.set_text(text)
+        .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
+    Ok(())
 }
 
 fn run_cmd(prog: &str, args: &[&str]) -> bool {
@@ -293,81 +548,49 @@ fn run_cmd(prog: &str, args: &[&str]) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn simulate_paste() -> Result<()> {
+fn paste_macos(text: &str) -> Result<()> {
+    // Try to type directly via osascript keystroke
+    let script = format!(
+        "tell application \"System Events\" to keystroke \"{}\"",
+        text.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    if run_cmd("osascript", &["-e", &script]) {
+        return Ok(());
+    }
+    // Fallback: clipboard + Cmd+V
+    let mut cb = arboard::Clipboard::new()
+        .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
+    cb.set_text(text)
+        .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
+    std::thread::sleep(std::time::Duration::from_millis(80));
     if run_cmd(
         "osascript",
-        &[
-            "-e",
-            "tell application \"System Events\" to keystroke \"v\" using {command down}",
-        ],
+        &["-e", "tell application \"System Events\" to keystroke \"v\" using {command down}"],
     ) {
         return Ok(());
     }
-    Err(anyhow::anyhow!(
-        "paste failed — text is in clipboard, paste with Cmd+V"
-    ))
+    eprintln!("[paste] text in clipboard — press Cmd+V to paste");
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
-fn simulate_paste() -> Result<()> {
+fn paste_windows(text: &str) -> Result<()> {
+    let mut cb = arboard::Clipboard::new()
+        .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
+    cb.set_text(text)
+        .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
+    std::thread::sleep(std::time::Duration::from_millis(80));
     if run_cmd(
         "powershell",
-        &[
-            "-NoProfile",
-            "-Command",
-            "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^v')",
-        ],
+        &["-NoProfile", "-Command",
+          "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^v')"],
     ) {
         return Ok(());
     }
-    Err(anyhow::anyhow!(
-        "paste failed — text is in clipboard, paste with Ctrl+V"
-    ))
+    eprintln!("[paste] text in clipboard — press Ctrl+V to paste");
+    Ok(())
 }
 
-#[cfg(target_os = "linux")]
-fn simulate_paste() -> Result<()> {
-    use rdev::{simulate, EventType, Key};
-
-    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
-
-    // wtype: best option for Wayland
-    if run_cmd("wtype", &["-M", "ctrl", "-k", "v", "-m", "ctrl"]) {
-        return Ok(());
-    }
-    // ydotool: alternative Wayland tool
-    if run_cmd("ydotool", &["key", "29:1", "47:1", "47:0", "29:0"]) {
-        return Ok(());
-    }
-
-    if !is_wayland {
-        // X11: rdev simulate
-        let d = std::time::Duration::from_millis(20);
-        if simulate(&EventType::KeyPress(Key::ControlLeft)).is_ok() {
-            std::thread::sleep(d);
-            simulate(&EventType::KeyPress(Key::KeyV)).ok();
-            std::thread::sleep(d);
-            simulate(&EventType::KeyRelease(Key::KeyV)).ok();
-            std::thread::sleep(d);
-            simulate(&EventType::KeyRelease(Key::ControlLeft)).ok();
-            return Ok(());
-        }
-        // xdotool fallback
-        if run_cmd("xdotool", &["key", "--clearmodifiers", "ctrl+v"]) {
-            return Ok(());
-        }
-    }
-
-    // Text is in clipboard — user can paste manually
-    Err(anyhow::anyhow!(
-        "no paste tool available\n  Install:  sudo apt install wtype\n  Text is in clipboard — paste with Ctrl+V"
-    ))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn simulate_paste() -> Result<()> {
-    Err(anyhow::anyhow!("paste not supported on this platform"))
-}
 
 // ── Main hotkey runner ────────────────────────────────────────────────────────
 
@@ -384,10 +607,9 @@ pub fn run_hotkey(
     let hotkey = parse_combo(&combo_str)?;
     let ds = detect_display_server();
 
-    // ── Channel shared by all trigger sources ─────────────────────────────────
-    let (tx, rx) = mpsc::channel::<()>();
+    // ── Channel: true = key pressed (start), false = key released (stop) ─────
+    let (tx, rx) = mpsc::channel::<HotkeySignal>();
 
-    // global_hotkey_ok tracks whether a global listener was successfully started
     let mut global_hotkey_ok = false;
 
     // ── Source 1: evdev (Linux — works on Wayland + X11, needs input group) ──
@@ -401,119 +623,26 @@ pub fn run_hotkey(
     // ── Source 2: rdev (macOS / Windows / Linux X11 fallback) ────────────────
     #[cfg(not(target_os = "linux"))]
     {
-        let ctrl = Arc::new(AtomicBool::new(false));
-        let alt = Arc::new(AtomicBool::new(false));
-        let shift = Arc::new(AtomicBool::new(false));
-        let meta = Arc::new(AtomicBool::new(false));
-        let (c2, a2, sh2, m2) = (ctrl.clone(), alt.clone(), shift.clone(), meta.clone());
-        let hotkey2 = hotkey.clone();
-        let tx2 = tx.clone();
-
-        std::thread::spawn(move || {
-            let cb = move |event: Event| {
-                match event.event_type {
-                    EventType::KeyPress(key) => {
-                        match key {
-                            Key::ControlLeft | Key::ControlRight => {
-                                c2.store(true, Ordering::Relaxed)
-                            }
-                            Key::Alt | Key::AltGr => a2.store(true, Ordering::Relaxed),
-                            Key::ShiftLeft | Key::ShiftRight => {
-                                sh2.store(true, Ordering::Relaxed)
-                            }
-                            Key::MetaLeft | Key::MetaRight => m2.store(true, Ordering::Relaxed),
-                            _ => {}
-                        }
-                        if key == hotkey2.trigger {
-                            let ok = (!hotkey2.need_ctrl || c2.load(Ordering::Relaxed))
-                                && (!hotkey2.need_alt || a2.load(Ordering::Relaxed))
-                                && (!hotkey2.need_shift || sh2.load(Ordering::Relaxed))
-                                && (!hotkey2.need_meta || m2.load(Ordering::Relaxed));
-                            if ok {
-                                let _ = tx2.send(());
-                            }
-                        }
-                    }
-                    EventType::KeyRelease(key) => match key {
-                        Key::ControlLeft | Key::ControlRight => {
-                            c2.store(false, Ordering::Relaxed)
-                        }
-                        Key::Alt | Key::AltGr => a2.store(false, Ordering::Relaxed),
-                        Key::ShiftLeft | Key::ShiftRight => sh2.store(false, Ordering::Relaxed),
-                        Key::MetaLeft | Key::MetaRight => m2.store(false, Ordering::Relaxed),
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            };
-            if let Err(e) = listen(cb) {
-                warn!("rdev listener stopped: {:?}", e);
-            }
-        });
+        spawn_rdev_listener(&hotkey, tx.clone());
         global_hotkey_ok = true;
     }
 
-    // On Linux also run rdev as a fallback for X11 sessions when evdev failed
     #[cfg(target_os = "linux")]
     if !global_hotkey_ok && ds == DisplayServer::X11 {
-        let ctrl = Arc::new(AtomicBool::new(false));
-        let alt = Arc::new(AtomicBool::new(false));
-        let shift = Arc::new(AtomicBool::new(false));
-        let meta = Arc::new(AtomicBool::new(false));
-        let (c2, a2, sh2, m2) = (ctrl.clone(), alt.clone(), shift.clone(), meta.clone());
-        let hotkey2 = hotkey.clone();
-        let tx2 = tx.clone();
-        std::thread::spawn(move || {
-            let cb = move |event: Event| {
-                match event.event_type {
-                    EventType::KeyPress(key) => {
-                        match key {
-                            Key::ControlLeft | Key::ControlRight => {
-                                c2.store(true, Ordering::Relaxed)
-                            }
-                            Key::Alt | Key::AltGr => a2.store(true, Ordering::Relaxed),
-                            Key::ShiftLeft | Key::ShiftRight => {
-                                sh2.store(true, Ordering::Relaxed)
-                            }
-                            Key::MetaLeft | Key::MetaRight => m2.store(true, Ordering::Relaxed),
-                            _ => {}
-                        }
-                        if key == hotkey2.trigger {
-                            let ok = (!hotkey2.need_ctrl || c2.load(Ordering::Relaxed))
-                                && (!hotkey2.need_alt || a2.load(Ordering::Relaxed))
-                                && (!hotkey2.need_shift || sh2.load(Ordering::Relaxed))
-                                && (!hotkey2.need_meta || m2.load(Ordering::Relaxed));
-                            if ok {
-                                let _ = tx2.send(());
-                            }
-                        }
-                    }
-                    EventType::KeyRelease(key) => match key {
-                        Key::ControlLeft | Key::ControlRight => {
-                            c2.store(false, Ordering::Relaxed)
-                        }
-                        Key::Alt | Key::AltGr => a2.store(false, Ordering::Relaxed),
-                        Key::ShiftLeft | Key::ShiftRight => sh2.store(false, Ordering::Relaxed),
-                        Key::MetaLeft | Key::MetaRight => m2.store(false, Ordering::Relaxed),
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            };
-            if let Err(e) = listen(cb) {
-                warn!("rdev (X11) listener stopped: {:?}", e);
-            }
-        });
+        spawn_rdev_listener(&hotkey, tx.clone());
         global_hotkey_ok = true;
     }
 
-    // ── Source 3: stdin Enter key (always available) ──────────────────────────
+    // ── Source 3: stdin Enter key (toggle fallback) ──────────────────────────
     {
         let tx_stdin = tx.clone();
+        let stdin_recording = Arc::new(AtomicBool::new(false));
+        let sr = stdin_recording.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             for _line in std::io::stdin().lock().lines().flatten() {
-                let _ = tx_stdin.send(());
+                let was = sr.fetch_xor(true, Ordering::Relaxed);
+                let _ = tx_stdin.send(!was); // toggle: send true then false
             }
         });
     }
@@ -521,11 +650,11 @@ pub fn run_hotkey(
     // ── Startup banner ────────────────────────────────────────────────────────
     eprintln!();
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    eprintln!(" voicr  push-to-talk");
+    eprintln!(" voicr  hold-to-talk");
     eprintln!("─────────────────────────────────────");
 
     if global_hotkey_ok {
-        eprintln!(" Hotkey  : [{}]  (global)", combo_str);
+        eprintln!(" Hotkey  : hold [{}]  (global)", combo_str);
     } else {
         eprintln!(" Hotkey  : [{}]  not active", combo_str);
         match ds {
@@ -539,7 +668,7 @@ pub fn run_hotkey(
         }
     }
 
-    eprintln!(" Fallback: press Enter here to toggle");
+    eprintln!(" Fallback: press Enter to toggle");
     if no_paste {
         eprintln!(" Output  : stdout (--no-paste)");
     } else {
@@ -550,13 +679,21 @@ pub fn run_hotkey(
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     eprintln!();
 
+    // Pre-start ydotoold daemon so it's ready before first paste
+    #[cfg(target_os = "linux")]
+    {
+        if crate::setup::cmd_exists("ydotool") {
+            let _ = ensure_ydotoold();
+        }
+    }
+
     // ── Build transcription manager ───────────────────────────────────────────
     let status_cb: crate::managers::transcription::StatusCallback = Arc::new(|status| {
         use crate::managers::transcription::ModelStatus;
         match status {
             ModelStatus::Loading { model_id } => eprintln!("[model] loading {}...", model_id),
             ModelStatus::Loaded { model_name, .. } => {
-                eprintln!("[model] {} ready\n", model_name)
+                eprintln!("[model] {} ready", model_name)
             }
             ModelStatus::Unloaded => {}
             ModelStatus::Error { message, .. } => eprintln!("[model] error: {}", message),
@@ -570,18 +707,22 @@ pub fn run_hotkey(
     )?);
     tm.ensure_model_loaded()?;
 
-    eprintln!(
-        "[ready] press [{}] or Enter to start recording",
-        combo_str
-    );
-    eprintln!();
+    // Drain any stale events that arrived during model loading
+    while rx.try_recv().is_ok() {}
 
-    // ── Toggle loop ───────────────────────────────────────────────────────────
-    let mut is_recording = false;
+    eprintln!("Ready — hold [{}] and speak\n", combo_str);
+
+    // ── Hold-to-talk loop ────────────────────────────────────────────────────
     let mut recorder: Option<AudioRecorder> = None;
 
-    for () in &rx {
-        if !is_recording {
+    for signal in &rx {
+        if signal {
+            // ── KEY PRESSED: start recording ─────────────────────────────
+            // Ignore if already recording
+            if recorder.is_some() {
+                continue;
+            }
+
             let (vad_enabled, vad_threshold, device_name) = {
                 let cfg = config.lock().unwrap();
                 (
@@ -630,36 +771,33 @@ pub fn run_hotkey(
             }
 
             recorder = Some(rec);
-            is_recording = true;
-            eprintln!(
-                "recording  — press [{}] or Enter to stop",
-                combo_str
-            );
+            eprintln!("recording...");
         } else {
-            is_recording = false;
+            // ── KEY RELEASED: stop recording + transcribe + paste ─────────
             let audio = if let Some(mut rec) = recorder.take() {
                 let a = rec.stop().unwrap_or_default();
                 let _ = rec.close();
                 a
             } else {
-                vec![]
+                continue; // not recording, ignore release
             };
 
             if audio.is_empty() {
-                eprintln!("[warning] no audio");
-                eprintln!("[ready] press [{}] or Enter to record", combo_str);
+                eprintln!("[skip] no audio captured");
                 continue;
             }
 
-            eprintln!("stopped  — transcribing...");
+            let duration = audio.len() as f64 / 16000.0;
+            eprintln!("transcribing ({:.1}s)...", duration);
 
             let tm_clone = tm.clone();
             let config_clone = config.clone();
-            let combo_disp = combo_str.clone();
 
             std::thread::spawn(move || {
                 match tm_clone.transcribe(audio) {
-                    Ok(t) if t.trim().is_empty() => eprintln!("[transcription] (empty)"),
+                    Ok(t) if t.trim().is_empty() => {
+                        eprintln!("[transcription] (empty)");
+                    }
                     Ok(text) => {
                         eprintln!("[transcription] {}", text);
                         if no_paste {
@@ -670,6 +808,8 @@ pub fn run_hotkey(
                                 .unwrap()
                                 .output
                                 .append_trailing_space;
+                            // Brief pause so modifier keys are fully released
+                            std::thread::sleep(std::time::Duration::from_millis(200));
                             match paste_text(&text, trailing) {
                                 Ok(_) => eprintln!("[pasted]"),
                                 Err(e) => eprintln!("[paste] {}", e),
@@ -678,13 +818,67 @@ pub fn run_hotkey(
                     }
                     Err(e) => eprintln!("[error] {}", e),
                 }
-                eprintln!();
-                eprintln!(
-                    "[ready] press [{}] or Enter to record again",
-                    combo_disp
-                );
             });
         }
     }
     Ok(())
+}
+
+/// Spawn an rdev-based keyboard listener (macOS / Windows / Linux X11 fallback).
+fn spawn_rdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) {
+    let ctrl = Arc::new(AtomicBool::new(false));
+    let alt = Arc::new(AtomicBool::new(false));
+    let shift = Arc::new(AtomicBool::new(false));
+    let meta = Arc::new(AtomicBool::new(false));
+    let combo_active = Arc::new(AtomicBool::new(false));
+    let (c2, a2, sh2, m2) = (ctrl.clone(), alt.clone(), shift.clone(), meta.clone());
+    let active2 = combo_active.clone();
+    let hotkey2 = hotkey.clone();
+
+    std::thread::spawn(move || {
+        let cb = move |event: Event| {
+            match event.event_type {
+                EventType::KeyPress(key) => {
+                    match key {
+                        Key::ControlLeft | Key::ControlRight => {
+                            c2.store(true, Ordering::Relaxed)
+                        }
+                        Key::Alt | Key::AltGr => a2.store(true, Ordering::Relaxed),
+                        Key::ShiftLeft | Key::ShiftRight => {
+                            sh2.store(true, Ordering::Relaxed)
+                        }
+                        Key::MetaLeft | Key::MetaRight => m2.store(true, Ordering::Relaxed),
+                        _ => {}
+                    }
+                    if key == hotkey2.trigger {
+                        let ok = (!hotkey2.need_ctrl || c2.load(Ordering::Relaxed))
+                            && (!hotkey2.need_alt || a2.load(Ordering::Relaxed))
+                            && (!hotkey2.need_shift || sh2.load(Ordering::Relaxed))
+                            && (!hotkey2.need_meta || m2.load(Ordering::Relaxed));
+                        if ok && !active2.swap(true, Ordering::Relaxed) {
+                            let _ = tx.send(true);
+                        }
+                    }
+                }
+                EventType::KeyRelease(key) => {
+                    match key {
+                        Key::ControlLeft | Key::ControlRight => {
+                            c2.store(false, Ordering::Relaxed)
+                        }
+                        Key::Alt | Key::AltGr => a2.store(false, Ordering::Relaxed),
+                        Key::ShiftLeft | Key::ShiftRight => sh2.store(false, Ordering::Relaxed),
+                        Key::MetaLeft | Key::MetaRight => m2.store(false, Ordering::Relaxed),
+                        _ => {}
+                    }
+                    if key == hotkey2.trigger && active2.swap(false, Ordering::Relaxed) {
+                        let _ = tx.send(false);
+                    }
+                }
+                _ => {}
+            }
+        };
+        if let Err(e) = listen(cb) {
+            warn!("rdev listener stopped: {:?}", e);
+        }
+    });
 }

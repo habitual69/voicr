@@ -150,7 +150,7 @@ pub fn run_daemon(
                     model_id: None,
                     model_name: None,
                 },
-                ModelStatus::Error { model_id, message } => Event::Error { message },
+                ModelStatus::Error { message, .. } => Event::Error { message },
             };
             broadcast(&clients_for_status, &event);
         });
@@ -524,7 +524,7 @@ fn do_stop_and_transcribe(
     state: &Arc<Mutex<DaemonState>>,
     recorder: &Arc<Mutex<Option<AudioRecorder>>>,
     transcription_manager: &Arc<TranscriptionManager>,
-    config: &Arc<Mutex<Config>>,
+    _config: &Arc<Mutex<Config>>,
 ) {
     let current = state.lock().unwrap().clone();
     if current != DaemonState::Recording {

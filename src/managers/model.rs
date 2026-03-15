@@ -820,6 +820,7 @@ impl ModelManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn cancel_download(&self, model_id: &str) {
         let flags = self.cancel_flags.lock().unwrap();
         if let Some(flag) = flags.get(model_id) {

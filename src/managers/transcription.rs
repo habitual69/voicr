@@ -35,7 +35,7 @@ pub enum ModelStatus {
     Loading { model_id: String },
     Loaded { model_id: String, model_name: String },
     Unloaded,
-    Error { model_id: String, message: String },
+    Error { #[allow(dead_code)] model_id: String, message: String },
 }
 
 enum LoadedEngine {
@@ -482,6 +482,7 @@ impl TranscriptionManager {
         };
 
         // Apply word correction (skip for Whisper since custom_words passed as initial_prompt)
+        #[allow(unused_variables)]
         let model_id = cfg.model.selected.clone();
         let is_whisper = {
             #[cfg(feature = "whisper")]

@@ -100,45 +100,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: "voicr ${{ github.ref_name }}"
-          body: |
-            ## Installation
-
-            Download the binary for your platform, make it executable, and place it somewhere in your `$PATH`.
-
-            ### Linux (x86_64)
-            ```bash
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/voicr-linux-x86_64 -o voicr
-            chmod +x voicr
-            sudo mv voicr /usr/local/bin/
-            ```
-
-            ### macOS (Apple Silicon)
-            ```bash
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/voicr-macos-arm64 -o voicr
-            chmod +x voicr
-            sudo mv voicr /usr/local/bin/
-            ```
-
-            ### macOS (Intel)
-            ```bash
-            curl -L https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/voicr-macos-x86_64 -o voicr
-            chmod +x voicr
-            sudo mv voicr /usr/local/bin/
-            ```
-
-            ### Windows (x86_64)
-            Download `voicr-windows-x86_64.exe`, rename to `voicr.exe`, and add to a folder in your `%PATH%`.
-
-            > **Note:** Daemon mode (`voicr daemon`) requires Linux or macOS.
-
-            ## Usage
-            ```
-            voicr model download moonshine-base   # download a model
-            voicr daemon                          # start background daemon
-            voicr send toggle                     # start/stop recording
-            voicr transcribe                      # one-shot transcription
-            voicr --help                          # full help
-            ```
+          body_path: CHANGELOG.md
           files: |
             artifacts/voicr-linux-x86_64/voicr-linux-x86_64
             artifacts/voicr-macos-arm64/voicr-macos-arm64

@@ -30,6 +30,10 @@ impl SileroVad {
 }
 
 impl VoiceActivityDetector for SileroVad {
+    fn reset(&mut self) {
+        self.engine.reset();
+    }
+
     fn push_frame<'a>(&'a mut self, frame: &'a [f32]) -> Result<VadFrame<'a>> {
         if frame.len() != SILERO_FRAME_SAMPLES {
             anyhow::bail!(

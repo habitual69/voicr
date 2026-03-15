@@ -82,29 +82,37 @@ async fn ensure_default_model(
 fn ensure_linux_setup() {
     let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
-    if is_wayland {
-        // Install wtype if missing (needed for Wayland paste)
-        if !cmd_exists("wtype") {
-            eprintln!("Installing wtype (Wayland paste tool)...");
-            if try_install("wtype") {
-                eprintln!("wtype installed");
-            } else {
-                eprintln!("Could not auto-install wtype.");
-                eprintln!("  Install manually:  sudo apt install wtype");
-                eprintln!("  Until then, text is copied to clipboard after transcription.");
-            }
-        } else {
-            eprintln!("wtype (Wayland paste) ready");
+    // ydotool injects keystrokes via /dev/uinput — works on all compositors
+    // (GNOME doesn't support virtual keyboard protocol that wtype needs)
+    if !cmd_exists("ydotool") {
+        eprintln!("Installing ydotool...");
+        if !try_install("ydotool") {
+            eprintln!("Could not auto-install ydotool.");
+            eprintln!("  Install manually:  sudo apt install ydotool");
         }
     }
 
-    // Check input group (needed for evdev global hotkeys on Wayland)
-    if !is_in_input_group() {
-        eprintln!("Setting up global hotkey access...");
+    // /dev/uinput must be accessible to the input group.
+    // By default Ubuntu sets it as root:root 0600 — fix with a udev rule.
+    ensure_uinput_group_access();
+
+    // Check input group for THIS process (not just login session config)
+    if !current_process_in_input_group() {
+        // Check if the user IS in the group in system config but session hasn't loaded it
+        if user_configured_in_input_group() {
+            // Group was added in a previous run — just re-exec via `sg input` to activate it
+            // without requiring a full re-login.
+            eprintln!("Activating input group (no re-login needed)...");
+            reexec_with_input_group();
+            // reexec_with_input_group calls process::exit, so we never get here
+        }
+
+        // Not in the group at all — add the user, then re-exec
+        eprintln!("Setting up global hotkey access (evdev)...");
         if try_add_to_input_group() {
             eprintln!("Added to 'input' group.");
-            eprintln!("  Log out and back in for the global hotkey to work.");
-            eprintln!("  Until then, press Enter in this terminal to toggle recording.");
+            eprintln!("Activating now (no re-login needed)...");
+            reexec_with_input_group();
         } else {
             eprintln!("Could not add to 'input' group automatically.");
             eprintln!("  Run once:  sudo usermod -aG input $USER   (then re-login)");
@@ -113,11 +121,70 @@ fn ensure_linux_setup() {
     } else {
         eprintln!("Input group (global hotkey) ready");
     }
+
 }
 
+/// Ensure /dev/uinput is accessible to the `input` group.
+/// Ubuntu sets /dev/uinput as root:root 0600 by default.
+/// We fix this two ways:
+///   1. Immediately: chmod 0660 + chgrp input (via pkexec) — takes effect NOW
+///   2. Persistently: write a udev rule so it survives reboots
 #[cfg(target_os = "linux")]
-fn is_in_input_group() -> bool {
-    std::process::Command::new("groups")
+fn ensure_uinput_group_access() {
+    if !std::path::Path::new("/dev/uinput").exists() {
+        return;
+    }
+    // Already accessible?
+    if std::fs::OpenOptions::new().write(true).open("/dev/uinput").is_ok() {
+        return;
+    }
+
+    eprintln!("Granting input group access to /dev/uinput (one-time setup)...");
+
+    // Step 1: Fix permissions RIGHT NOW via pkexec (survives until reboot)
+    let chmod_ok = std::process::Command::new("pkexec")
+        .args(["sh", "-c", "chmod 0660 /dev/uinput && chgrp input /dev/uinput"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        || std::process::Command::new("sudo")
+            .args(["-n", "sh", "-c", "chmod 0660 /dev/uinput && chgrp input /dev/uinput"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+    // Step 2: Write udev rule for persistence across reboots
+    let rule_path = "/etc/udev/rules.d/99-voicr-uinput.rules";
+    if !std::path::Path::new(rule_path).exists() {
+        let rule = "KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\"\n";
+        let tmp = "/tmp/voicr-uinput.rules";
+        if std::fs::write(tmp, rule).is_ok() {
+            let _ = std::process::Command::new("pkexec")
+                .args(["sh", "-c", &format!(
+                    "cp {} {} && udevadm control --reload-rules",
+                    tmp, rule_path
+                )])
+                .status();
+        }
+    }
+
+    if chmod_ok {
+        eprintln!("/dev/uinput accessible (input group)");
+    } else {
+        eprintln!("Could not set /dev/uinput permissions automatically.");
+        eprintln!("  Run once:");
+        eprintln!("    echo 'KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\"' | sudo tee /etc/udev/rules.d/99-voicr-uinput.rules");
+        eprintln!("    sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput");
+    }
+}
+
+/// Check if THIS running process has the input group in its supplementary groups.
+/// Uses `id -Gn` which reflects the actual kernel-level groups for the current process,
+/// not just what's stored in /etc/group.
+#[cfg(target_os = "linux")]
+fn current_process_in_input_group() -> bool {
+    std::process::Command::new("id")
+        .arg("-Gn")
         .output()
         .map(|o| {
             String::from_utf8_lossy(&o.stdout)
@@ -125,6 +192,69 @@ fn is_in_input_group() -> bool {
                 .any(|g| g == "input")
         })
         .unwrap_or(false)
+}
+
+/// Check if the user account is listed in the input group in /etc/group.
+/// This is true even before a re-login / sg session.
+#[cfg(target_os = "linux")]
+fn user_configured_in_input_group() -> bool {
+    let user = match std::env::var("USER").ok().filter(|u| !u.is_empty()) {
+        Some(u) => u,
+        None => return false,
+    };
+    // `getent group input` prints: input:x:GID:user1,user2,...
+    std::process::Command::new("getent")
+        .args(["group", "input"])
+        .output()
+        .map(|o| {
+            let line = String::from_utf8_lossy(&o.stdout);
+            line.split(':')
+                .nth(3)
+                .unwrap_or("")
+                .split(',')
+                .any(|u| u.trim() == user)
+        })
+        .unwrap_or(false)
+}
+
+/// Re-exec the current process under `sg input -c "..."` so the input group is
+/// active immediately, without requiring the user to log out.
+/// This function does not return — it calls process::exit.
+#[cfg(target_os = "linux")]
+fn reexec_with_input_group() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => {
+            eprintln!("  (could not find current executable — please re-login)");
+            return;
+        }
+    };
+    // Rebuild the original command line with shell-safe quoting.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cmd = if args.is_empty() {
+        exe.clone()
+    } else {
+        let quoted_args: Vec<String> = args
+            .iter()
+            .map(|a| {
+                if a.contains(' ') || a.contains('\'') || a.contains('"') {
+                    format!("'{}'", a.replace('\'', "'\\''"))
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
+        format!("{} {}", exe, quoted_args.join(" "))
+    };
+
+    let status = std::process::Command::new("sg")
+        .args(["input", "-c", &cmd])
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("  sg failed: {} — please re-login for hotkey to work", e);
+            std::process::exit(1);
+        });
+    std::process::exit(status.code().unwrap_or(0));
 }
 
 #[cfg(target_os = "linux")]
@@ -152,7 +282,7 @@ fn try_add_to_input_group() -> bool {
         .unwrap_or(false)
 }
 
-fn cmd_exists(name: &str) -> bool {
+pub fn cmd_exists(name: &str) -> bool {
     std::process::Command::new("which")
         .arg(name)
         .stdout(std::process::Stdio::null())

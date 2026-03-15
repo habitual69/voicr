@@ -271,6 +271,7 @@ impl HistoryManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get_audio_file_path(&self, file_name: &str) -> PathBuf {
         self.recordings_dir.join(file_name)
     }
