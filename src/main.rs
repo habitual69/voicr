@@ -2,6 +2,7 @@ mod audio_toolkit;
 mod cli;
 mod config;
 mod daemon;
+mod hotkey;
 mod managers;
 mod paths;
 
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
         Commands::Config(config_cmd) => cmd_config(config, config_cmd),
         Commands::History(history_cmd) => cmd_history(config, history_cmd).await,
         Commands::Devices => cmd_devices(),
+        Commands::Hotkey { combo, no_paste } => cmd_hotkey(config, combo, no_paste).await,
     }
 }
 
@@ -656,6 +658,30 @@ fn cmd_devices() -> Result<()> {
     println!("Set a specific device with: voicr config set audio.device \"Device Name\"");
 
     Ok(())
+}
+
+// ── Push-to-talk hotkey mode ──────────────────────────────────────────────────
+
+async fn cmd_hotkey(
+    config: Arc<Mutex<Config>>,
+    combo: Option<String>,
+    no_paste: bool,
+) -> Result<()> {
+    let model_manager = Arc::new(build_model_manager(config.clone(), false)?);
+
+    let vad_path = match model_manager.ensure_vad_model().await {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("Warning: VAD unavailable ({}). Recording without silence detection.", e);
+            None
+        }
+    };
+
+    // run_hotkey blocks until Ctrl+C
+    tokio::task::spawn_blocking(move || {
+        hotkey::run_hotkey(config, model_manager, vad_path, combo, no_paste)
+    })
+    .await?
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -10,6 +10,14 @@ pub struct Config {
     pub transcription: TranscriptionConfig,
     pub history: HistoryConfig,
     pub output: OutputConfig,
+    pub hotkey: HotkeyConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotkeyConfig {
+    /// Key combo to trigger push-to-talk (e.g. "ctrl+space", "alt+shift+r")
+    pub combo: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +144,15 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             history: HistoryConfig::default(),
             output: OutputConfig::default(),
+            hotkey: HotkeyConfig::default(),
+        }
+    }
+}
+
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        Self {
+            combo: "ctrl+space".to_string(),
         }
     }
 }
@@ -304,6 +321,7 @@ pub fn set_config_key(config: &mut Config, key: &str, value: &str) -> Result<()>
             config.output.append_trailing_space = value.parse::<bool>()
                 .map_err(|_| anyhow::anyhow!("append_trailing_space must be true or false"))?;
         }
+        "hotkey.combo" => config.hotkey.combo = value.to_string(),
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
     Ok(())

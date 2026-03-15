@@ -50,10 +50,10 @@ jobs:
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
-      # Linux: ALSA headers (required by cpal)
+      # Linux: ALSA (cpal) + XTest (rdev global hotkey)
       - name: Install Linux deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxtst-dev pkg-config
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}

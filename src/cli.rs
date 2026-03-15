@@ -76,6 +76,17 @@ pub enum Commands {
 
     /// List audio input and output devices
     Devices,
+
+    /// Run in push-to-talk mode with a global hotkey (default: Ctrl+Space)
+    Hotkey {
+        /// Override the key combo (e.g. "ctrl+space", "alt+shift+r")
+        #[arg(short, long)]
+        combo: Option<String>,
+
+        /// Print transcription to stdout instead of pasting into the active window
+        #[arg(long)]
+        no_paste: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
