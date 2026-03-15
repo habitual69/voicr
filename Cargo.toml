@@ -77,6 +77,9 @@ chrono = "0.4"
 dirs = "5"
 ctrlc = { version = "3", features = ["termination"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
 

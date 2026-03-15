@@ -5,11 +5,11 @@ use clap::{Parser, Subcommand};
     name = "voicr",
     about = "Headless speech-to-text CLI and daemon",
     version,
-    long_about = "voicr is a headless speech-to-text tool.\n\nRun as a background daemon, do one-shot transcriptions,\nmanage models, and configure settings from the terminal."
+    long_about = "voicr — headless speech-to-text\n\nRun without arguments to start push-to-talk mode with automatic setup.\nHotkey: Ctrl+Space (configurable).  Transcription is pasted into the active window."
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 
     /// Enable verbose debug logging
     #[arg(short, long, global = true)]

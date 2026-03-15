@@ -5,6 +5,7 @@ mod daemon;
 mod hotkey;
 mod managers;
 mod paths;
+mod setup;
 
 use anyhow::Result;
 use clap::Parser;
@@ -34,25 +35,55 @@ async fn main() -> Result<()> {
     let config = Arc::new(Mutex::new(config));
 
     match cli.command {
-        Commands::Daemon { socket } => {
+        None => cmd_default(config).await,
+        Some(Commands::Daemon { socket }) => {
             cmd_daemon(config, socket).await
         }
-        Commands::Transcribe {
+        Some(Commands::Transcribe {
             file,
             output,
             duration,
             no_vad,
             auto_stop,
-        } => cmd_transcribe(config, file, output, duration, no_vad, auto_stop).await,
-        Commands::Send { command, socket, wait } => {
+        }) => cmd_transcribe(config, file, output, duration, no_vad, auto_stop).await,
+        Some(Commands::Send { command, socket, wait }) => {
             cmd_send(&command, socket, wait).await
         }
-        Commands::Model(model_cmd) => cmd_model(config, model_cmd).await,
-        Commands::Config(config_cmd) => cmd_config(config, config_cmd),
-        Commands::History(history_cmd) => cmd_history(config, history_cmd).await,
-        Commands::Devices => cmd_devices(),
-        Commands::Hotkey { combo, no_paste } => cmd_hotkey(config, combo, no_paste).await,
+        Some(Commands::Model(model_cmd)) => cmd_model(config, model_cmd).await,
+        Some(Commands::Config(config_cmd)) => cmd_config(config, config_cmd),
+        Some(Commands::History(history_cmd)) => cmd_history(config, history_cmd).await,
+        Some(Commands::Devices) => cmd_devices(),
+        Some(Commands::Hotkey { combo, no_paste }) => cmd_hotkey(config, combo, no_paste).await,
     }
+}
+
+// ── Default (no-arg) mode ─────────────────────────────────────────────────────
+
+async fn cmd_default(config: Arc<Mutex<Config>>) -> Result<()> {
+    let model_manager = Arc::new(build_model_manager(config.clone(), false)?);
+
+    // Auto-setup: download model, install deps
+    {
+        let mut cfg = config.lock().unwrap().clone();
+        setup::ensure_ready(&mut cfg, &model_manager).await?;
+        // Persist any changes made by setup (e.g. model.selected)
+        *config.lock().unwrap() = cfg;
+    }
+
+    // Ensure VAD model
+    let vad_path = match model_manager.ensure_vad_model().await {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!("Warning: VAD unavailable ({})", e);
+            None
+        }
+    };
+
+    // Run push-to-talk (blocking)
+    tokio::task::spawn_blocking(move || {
+        hotkey::run_hotkey(config, model_manager, vad_path, None, false)
+    })
+    .await?
 }
 
 // ── Daemon ────────────────────────────────────────────────────────────────────
