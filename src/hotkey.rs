@@ -537,6 +537,7 @@ fn set_clipboard_linux(text: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn run_cmd(prog: &str, args: &[&str]) -> bool {
     std::process::Command::new(prog)
         .args(args)

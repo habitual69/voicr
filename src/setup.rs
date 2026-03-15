@@ -80,7 +80,7 @@ async fn ensure_default_model(
 
 #[cfg(target_os = "linux")]
 fn ensure_linux_setup() {
-    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+    let _is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
 
     // ydotool injects keystrokes via /dev/uinput — works on all compositors
     // (GNOME doesn't support virtual keyboard protocol that wtype needs)
