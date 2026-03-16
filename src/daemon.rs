@@ -26,14 +26,19 @@
 ///   {"type":"status","state":"idle"|"recording"|"transcribing","model":"..."}
 ///   {"type":"shutdown"}
 
+#[cfg(unix)]
 use crate::audio_toolkit::{vad::SmoothedVad, AudioRecorder, SileroVad};
 use crate::config::Config;
 use crate::managers::model::ModelManager;
 use crate::managers::transcription::TranscriptionManager;
 use anyhow::Result;
-use log::{debug, error, info, warn};
+use log::{error, info};
+#[cfg(unix)]
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+#[cfg(unix)]
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,6 +48,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 // ── Protocol types ────────────────────────────────────────────────────────────
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Deserialize)]
 struct Command {
     cmd: String,
@@ -52,6 +58,7 @@ struct Command {
     value: String,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Event {
@@ -87,6 +94,7 @@ enum Event {
 
 // ── Daemon state ──────────────────────────────────────────────────────────────
 
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, PartialEq)]
 enum DaemonState {
     Idle,
@@ -126,7 +134,6 @@ pub fn run_daemon(
     }
 
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
-    let state = Arc::new(Mutex::new(DaemonState::Idle));
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     // Build status callback that broadcasts model events to all clients
@@ -178,9 +185,6 @@ pub fn run_daemon(
         });
     }
 
-    // The recorder is shared between the command handler and main loop
-    let recorder: Arc<Mutex<Option<AudioRecorder>>> = Arc::new(Mutex::new(None));
-
     // Set up Ctrl+C / SIGTERM to shutdown gracefully
     let shutdown_clone = shutdown_flag.clone();
     let socket_path_clone = socket_path.clone();
@@ -195,6 +199,9 @@ pub fn run_daemon(
 
     #[cfg(unix)]
     {
+        let state = Arc::new(Mutex::new(DaemonState::Idle));
+        let recorder: Arc<Mutex<Option<AudioRecorder>>> = Arc::new(Mutex::new(None));
+
         let listener = UnixListener::bind(&socket_path)?;
         info!("Daemon listening on {:?}", socket_path);
         eprintln!("voicr daemon running. Socket: {}", socket_path.display());
@@ -237,16 +244,17 @@ pub fn run_daemon(
                 }
             }
         }
+
+        broadcast(&clients, &Event::Shutdown);
+        info!("Daemon shut down");
+        return Ok(());
     }
 
     #[cfg(not(unix))]
     {
+        let _ = &vad_model_path;
         anyhow::bail!("Daemon mode is only supported on Unix systems");
     }
-
-    broadcast(&clients, &Event::Shutdown);
-    info!("Daemon shut down");
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -453,6 +461,7 @@ fn handle_client(
     list.retain(|c| !Arc::ptr_eq(c, &client_writer));
 }
 
+#[cfg(unix)]
 fn do_start_recording(
     clients: &Clients,
     state: &Arc<Mutex<DaemonState>>,
@@ -519,6 +528,7 @@ fn do_start_recording(
     info!("Recording started");
 }
 
+#[cfg(unix)]
 fn do_stop_and_transcribe(
     clients: &Clients,
     state: &Arc<Mutex<DaemonState>>,
@@ -581,6 +591,7 @@ fn do_stop_and_transcribe(
     });
 }
 
+#[cfg(unix)]
 fn find_device_by_name(name: &str) -> Option<cpal::Device> {
     use crate::audio_toolkit::list_input_devices;
     list_input_devices()

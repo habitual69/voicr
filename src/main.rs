@@ -376,14 +376,15 @@ async fn cmd_send(command: &str, socket: Option<String>, wait: bool) -> Result<(
                 }
             }
         }
+
+        return Ok(());
     }
 
     #[cfg(not(unix))]
     {
+        let _ = (command, socket, wait);
         anyhow::bail!("send command is only supported on Unix systems");
     }
-
-    Ok(())
 }
 
 // ── Model commands ────────────────────────────────────────────────────────────

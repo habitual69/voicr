@@ -464,7 +464,7 @@ impl ModelManager {
         Ok(())
     }
 
-    fn update_download_status(&self) -> Result<()> {
+    pub fn update_download_status(&self) -> Result<()> {
         let mut models = self.available_models.lock().unwrap();
 
         for model in models.values_mut() {

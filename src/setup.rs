@@ -73,6 +73,10 @@ async fn ensure_default_model(
     )?;
     mm_with_progress.download_model(DEFAULT_MODEL).await?;
     eprintln!("\nModel downloaded");
+
+    // Refresh the original model manager's in-memory cache so load_model
+    // sees is_downloaded = true without requiring a restart.
+    model_manager.update_download_status()?;
     Ok(())
 }
 
@@ -282,6 +286,7 @@ fn try_add_to_input_group() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
 pub fn cmd_exists(name: &str) -> bool {
     std::process::Command::new("which")
         .arg(name)
@@ -292,6 +297,7 @@ pub fn cmd_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(unix)]
 fn try_install(pkg: &str) -> bool {
     // Try pkexec apt-get (graphical auth, works on GNOME/KDE)
     if std::process::Command::new("pkexec")

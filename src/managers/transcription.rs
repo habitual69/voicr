@@ -156,6 +156,7 @@ impl TranscriptionManager {
         self.lock_engine().is_some()
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn get_current_model(&self) -> Option<String> {
         self.current_model_id.lock().unwrap().clone()
     }

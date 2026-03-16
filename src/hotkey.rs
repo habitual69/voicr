@@ -39,6 +39,7 @@ pub struct ParsedHotkey {
     pub need_shift: bool,
     pub need_meta: bool,
     pub trigger: Key,
+    #[allow(dead_code)]
     pub trigger_str: String, // original string like "space"
 }
 
@@ -611,22 +612,18 @@ pub fn run_hotkey(
     // ── Channel: true = key pressed (start), false = key released (stop) ─────
     let (tx, rx) = mpsc::channel::<HotkeySignal>();
 
-    let mut global_hotkey_ok = false;
-
     // ── Source 1: evdev (Linux — works on Wayland + X11, needs input group) ──
     #[cfg(target_os = "linux")]
-    {
-        if spawn_evdev_listener(&hotkey, tx.clone()) {
-            global_hotkey_ok = true;
-        }
-    }
+    let mut global_hotkey_ok = {
+        spawn_evdev_listener(&hotkey, tx.clone())
+    };
 
     // ── Source 2: rdev (macOS / Windows / Linux X11 fallback) ────────────────
     #[cfg(not(target_os = "linux"))]
-    {
+    let global_hotkey_ok = {
         spawn_rdev_listener(&hotkey, tx.clone());
-        global_hotkey_ok = true;
-    }
+        true
+    };
 
     #[cfg(target_os = "linux")]
     if !global_hotkey_ok && ds == DisplayServer::X11 {

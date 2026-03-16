@@ -1,3 +1,8 @@
+## What's New in v0.2.2
+
+### Build Fix
+- Eliminated all 21 compiler warnings from cross-platform conditional compilation by properly gating unix-only imports, types, and functions behind `#[cfg(unix)]` / `#[cfg_attr]` attributes
+
 ## What's New in v0.2.1
 
 ### Windows Icon
