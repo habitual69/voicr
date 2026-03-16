@@ -23,6 +23,10 @@ pub enum Commands {
         /// Socket path (default: /tmp/voicr.sock)
         #[arg(short, long)]
         socket: Option<String>,
+
+        /// Run in the foreground instead of daemonizing
+        #[arg(short, long)]
+        foreground: bool,
     },
 
     /// Record audio and transcribe (one-shot)

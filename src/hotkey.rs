@@ -184,6 +184,12 @@ fn trigger_str_to_evdev(s: &str) -> Option<evdev::Key> {
 /// Hold-to-talk signal: `true` = key pressed (start), `false` = key released (stop).
 pub type HotkeySignal = bool;
 
+/// Public wrapper for daemon use.
+#[cfg(target_os = "linux")]
+pub fn spawn_evdev_listener_pub(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) -> bool {
+    spawn_evdev_listener(hotkey, tx)
+}
+
 #[cfg(target_os = "linux")]
 fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) -> bool {
     use evdev::{InputEventKind, Key as EK};
@@ -769,6 +775,7 @@ pub fn run_hotkey(
             }
 
             recorder = Some(rec);
+            crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStart);
             eprintln!("recording...");
         } else {
             // ── KEY RELEASED: stop recording + transcribe + paste ─────────
@@ -784,6 +791,8 @@ pub fn run_hotkey(
                 eprintln!("[skip] no audio captured");
                 continue;
             }
+
+            crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStop);
 
             let duration = audio.len() as f64 / 16000.0;
             eprintln!("transcribing ({:.1}s)...", duration);
@@ -823,7 +832,7 @@ pub fn run_hotkey(
 }
 
 /// Spawn an rdev-based keyboard listener (macOS / Windows / Linux X11 fallback).
-fn spawn_rdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) {
+pub fn spawn_rdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) {
     let ctrl = Arc::new(AtomicBool::new(false));
     let alt = Arc::new(AtomicBool::new(false));
     let shift = Arc::new(AtomicBool::new(false));

@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None => cmd_default(config).await,
-        Some(Commands::Daemon { socket }) => {
-            cmd_daemon(config, socket).await
+        Some(Commands::Daemon { socket, foreground }) => {
+            cmd_daemon(config, socket, foreground).await
         }
         Some(Commands::Transcribe {
             file,
@@ -88,7 +88,22 @@ async fn cmd_default(config: Arc<Mutex<Config>>) -> Result<()> {
 
 // ── Daemon ────────────────────────────────────────────────────────────────────
 
-async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>) -> Result<()> {
+async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>, foreground: bool) -> Result<()> {
+    // If not foreground, daemonize by re-spawning with --foreground
+    #[cfg(unix)]
+    if !foreground {
+        return daemonize(socket).await;
+    }
+
+    #[cfg(not(unix))]
+    if !foreground {
+        anyhow::bail!("Daemon mode is only supported on Unix systems");
+    }
+
+    // Write PID file
+    let pid_path = paths::pid_path();
+    std::fs::write(&pid_path, std::process::id().to_string())?;
+
     let socket_path = socket
         .map(std::path::PathBuf::from)
         .unwrap_or_else(paths::socket_path);
@@ -108,7 +123,82 @@ async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>) -> Resul
         }
     };
 
-    daemon::run_daemon(socket_path, config, model_manager, vad_path)
+    let result = daemon::run_daemon(socket_path, config, model_manager, vad_path);
+
+    // Clean up PID file on exit
+    let _ = std::fs::remove_file(&pid_path);
+
+    result
+}
+
+/// Daemonize by re-spawning the current process with --foreground,
+/// detached from the terminal with stdout/stderr redirected to a log file.
+#[cfg(unix)]
+async fn daemonize(socket: Option<String>) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    // Check if daemon is already running
+    let pid_path = paths::pid_path();
+    if pid_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                // Check if process is still alive
+                if unsafe { libc::kill(pid, 0) } == 0 {
+                    anyhow::bail!(
+                        "voicr daemon is already running (PID {}). Stop it with: voicr send shutdown",
+                        pid
+                    );
+                }
+            }
+        }
+        // Stale PID file, remove it
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    let exe = std::env::current_exe()?;
+    let log_path = paths::daemon_log_path()?;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_file_err = log_file.try_clone()?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon").arg("--foreground");
+
+    if let Some(ref s) = socket {
+        cmd.arg("--socket").arg(s);
+    }
+
+    // Forward --debug if it was set
+    if std::env::args().any(|a| a == "--debug" || a == "-d") {
+        cmd.arg("--debug");
+    }
+
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::from(log_file));
+    cmd.stderr(std::process::Stdio::from(log_file_err));
+
+    // Detach from terminal: create new session via setsid
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    let child = cmd.spawn()?;
+
+    let socket_display = socket
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(paths::socket_path);
+
+    eprintln!("voicr daemon started (PID: {})", child.id());
+    eprintln!("Socket: {}", socket_display.display());
+    eprintln!("Log:    {}", log_path.display());
+    eprintln!("Stop with: voicr send shutdown");
+
+    Ok(())
 }
 
 // ── One-shot transcription ────────────────────────────────────────────────────

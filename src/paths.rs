@@ -37,6 +37,14 @@ pub fn socket_path() -> PathBuf {
     std::env::temp_dir().join("voicr.sock")
 }
 
+pub fn pid_path() -> PathBuf {
+    std::env::temp_dir().join("voicr.pid")
+}
+
+pub fn daemon_log_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("daemon.log"))
+}
+
 /// Ensure all required directories exist
 pub fn ensure_dirs() -> Result<()> {
     std::fs::create_dir_all(config_dir()?)?;

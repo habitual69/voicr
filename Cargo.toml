@@ -1,6 +1,6 @@
 [package]
 name = "voicr"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 description = "Headless speech-to-text daemon and CLI"
 license = "MIT"
@@ -82,6 +82,7 @@ evdev = "0.12"
 
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
+libc = "0.2"
 
 [profile.release]
 lto = true

@@ -41,7 +41,7 @@ use std::io::Write;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -191,9 +191,11 @@ pub fn run_daemon(
     ctrlc::set_handler(move || {
         info!("Shutdown signal received");
         shutdown_clone.store(true, Ordering::Relaxed);
-        // Touch socket to unblock accept()
-        let _ = std::net::TcpStream::connect("127.0.0.1:0");
-        drop(std::fs::remove_file(&socket_path_clone));
+        // Connect to our own socket to unblock the accept() loop
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::net::UnixStream::connect(&socket_path_clone);
+        }
     })
     .ok();
 
@@ -204,8 +206,71 @@ pub fn run_daemon(
 
         let listener = UnixListener::bind(&socket_path)?;
         info!("Daemon listening on {:?}", socket_path);
-        eprintln!("voicr daemon running. Socket: {}", socket_path.display());
-        eprintln!("Send commands via: echo '{{\"cmd\":\"toggle\"}}' | nc -U {}", socket_path.display());
+
+        // ── Spawn hotkey listener for hold-to-talk ──────────────────────────
+        {
+            let combo_str = config.lock().unwrap().hotkey.combo.clone();
+            let clients_hk = clients.clone();
+            let state_hk = state.clone();
+            let recorder_hk = recorder.clone();
+            let tm_hk = transcription_manager.clone();
+            let config_hk = config.clone();
+            let vad_path_hk = vad_model_path.clone();
+
+            if let Ok(hotkey) = crate::hotkey::parse_combo(&combo_str) {
+                let (tx, rx) = mpsc::channel::<crate::hotkey::HotkeySignal>();
+
+                // Start evdev listener (Linux), fall back to rdev
+                #[cfg(target_os = "linux")]
+                let hotkey_ok = {
+                    let evdev_ok = crate::hotkey::spawn_evdev_listener_pub(&hotkey, tx.clone());
+                    if !evdev_ok && crate::hotkey::detect_display_server() == crate::hotkey::DisplayServer::X11 {
+                        crate::hotkey::spawn_rdev_listener(&hotkey, tx.clone());
+                        true
+                    } else {
+                        evdev_ok
+                    }
+                };
+                #[cfg(not(target_os = "linux"))]
+                let hotkey_ok = {
+                    crate::hotkey::spawn_rdev_listener(&hotkey, tx.clone());
+                    true
+                };
+
+                if hotkey_ok {
+                    info!("Hotkey [{}] active (hold-to-talk)", combo_str);
+                } else {
+                    warn!("Hotkey [{}] not available — use socket commands instead", combo_str);
+                }
+
+                // Process hotkey signals in a background thread
+                std::thread::spawn(move || {
+                    for signal in rx {
+                        if signal {
+                            // Key pressed → start recording
+                            do_start_recording(
+                                &clients_hk,
+                                &state_hk,
+                                &recorder_hk,
+                                &vad_path_hk,
+                                &config_hk,
+                            );
+                        } else {
+                            // Key released → stop + transcribe + paste
+                            do_stop_transcribe_paste(
+                                &clients_hk,
+                                &state_hk,
+                                &recorder_hk,
+                                &tm_hk,
+                                &config_hk,
+                            );
+                        }
+                    }
+                });
+            } else {
+                warn!("Invalid hotkey combo '{}', hotkey disabled", combo_str);
+            }
+        }
 
         for stream in listener.incoming() {
             if shutdown_flag.load(Ordering::Relaxed) {
@@ -222,6 +287,7 @@ pub fn run_daemon(
                     let recorder_clone = recorder.clone();
                     let vad_path_clone = vad_model_path.clone();
                     let shutdown_clone = shutdown_flag.clone();
+                    let socket_path_clone = socket_path.clone();
 
                     std::thread::spawn(move || {
                         handle_client(
@@ -234,6 +300,7 @@ pub fn run_daemon(
                             recorder_clone,
                             vad_path_clone,
                             shutdown_clone,
+                            socket_path_clone,
                         );
                     });
                 }
@@ -246,8 +313,12 @@ pub fn run_daemon(
         }
 
         broadcast(&clients, &Event::Shutdown);
+        // Clean up socket file
+        let _ = std::fs::remove_file(&socket_path);
         info!("Daemon shut down");
-        return Ok(());
+        // Force exit — evdev listener threads block on device reads and
+        // can't be interrupted, so we exit the process directly.
+        std::process::exit(0);
     }
 
     #[cfg(not(unix))]
@@ -268,6 +339,7 @@ fn handle_client(
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
     vad_model_path: PathBuf,
     shutdown_flag: Arc<AtomicBool>,
+    socket_path: PathBuf,
 ) {
     let write_half = match stream.try_clone() {
         Ok(s) => s,
@@ -443,6 +515,8 @@ fn handle_client(
             "shutdown" => {
                 shutdown_flag.store(true, Ordering::Relaxed);
                 broadcast(&clients, &Event::Shutdown);
+                // Connect to our own socket to unblock the accept() loop
+                let _ = UnixStream::connect(&socket_path);
                 break;
             }
             unknown => {
@@ -524,6 +598,7 @@ fn do_start_recording(
 
     *recorder.lock().unwrap() = Some(rec);
     *state.lock().unwrap() = DaemonState::Recording;
+    crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStart);
     broadcast(clients, &Event::Recording { state: "started".to_string() });
     info!("Recording started");
 }
@@ -558,6 +633,7 @@ fn do_stop_and_transcribe(
         audio
     };
 
+    crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStop);
     broadcast(clients, &Event::Recording { state: "stopped".to_string() });
     *state.lock().unwrap() = DaemonState::Transcribing;
     broadcast(clients, &Event::Transcribing);
@@ -585,6 +661,91 @@ fn do_stop_and_transcribe(
                     },
                 );
                 error!("Transcription error: {}", e);
+            }
+        }
+        *state_clone.lock().unwrap() = DaemonState::Idle;
+    });
+}
+
+/// Stop recording, transcribe, and paste into the active window (used by hotkey).
+#[cfg(unix)]
+fn do_stop_transcribe_paste(
+    clients: &Clients,
+    state: &Arc<Mutex<DaemonState>>,
+    recorder: &Arc<Mutex<Option<AudioRecorder>>>,
+    transcription_manager: &Arc<TranscriptionManager>,
+    config: &Arc<Mutex<Config>>,
+) {
+    let current = state.lock().unwrap().clone();
+    if current != DaemonState::Recording {
+        return;
+    }
+
+    // Stop recording
+    let audio = {
+        let mut rec = recorder.lock().unwrap();
+        let audio = rec.as_ref().and_then(|r| r.stop().ok()).unwrap_or_default();
+        if let Some(ref mut r) = *rec {
+            let _ = r.close();
+        }
+        *rec = None;
+        audio
+    };
+
+    crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStop);
+    broadcast(clients, &Event::Recording { state: "stopped".to_string() });
+
+    if audio.is_empty() {
+        info!("Hotkey: no audio captured");
+        *state.lock().unwrap() = DaemonState::Idle;
+        return;
+    }
+
+    *state.lock().unwrap() = DaemonState::Transcribing;
+    broadcast(clients, &Event::Transcribing);
+
+    let clients_clone = clients.clone();
+    let state_clone = state.clone();
+    let tm = transcription_manager.clone();
+    let config_clone = config.clone();
+
+    std::thread::spawn(move || {
+        let duration = audio.len() as f64 / 16000.0;
+        info!("Hotkey: transcribing ({:.1}s)...", duration);
+
+        match tm.transcribe(audio) {
+            Ok(text) if text.trim().is_empty() => {
+                info!("Hotkey: empty transcription");
+            }
+            Ok(text) => {
+                broadcast(
+                    &clients_clone,
+                    &Event::Transcription { text: text.clone() },
+                );
+                info!("Hotkey: [transcription] {}", text);
+
+                let trailing = config_clone
+                    .lock()
+                    .unwrap()
+                    .output
+                    .append_trailing_space;
+
+                // Brief pause so modifier keys are fully released
+                std::thread::sleep(std::time::Duration::from_millis(200));
+
+                match crate::hotkey::paste_text(&text, trailing) {
+                    Ok(_) => info!("Hotkey: pasted"),
+                    Err(e) => error!("Hotkey: paste failed: {}", e),
+                }
+            }
+            Err(e) => {
+                broadcast(
+                    &clients_clone,
+                    &Event::Error {
+                        message: format!("Transcription failed: {}", e),
+                    },
+                );
+                error!("Hotkey: transcription error: {}", e);
             }
         }
         *state_clone.lock().unwrap() = DaemonState::Idle;
