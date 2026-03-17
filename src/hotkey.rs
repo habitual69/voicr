@@ -583,19 +583,23 @@ fn paste_macos(text: &str) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn paste_windows(text: &str) -> Result<()> {
+    use rdev::{simulate, EventType, Key};
+
     let mut cb = arboard::Clipboard::new()
         .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
     cb.set_text(text)
         .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
+
+    // Brief pause so modifier keys from the hotkey are fully released
     std::thread::sleep(std::time::Duration::from_millis(80));
-    if run_cmd(
-        "powershell",
-        &["-NoProfile", "-Command",
-          "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^v')"],
-    ) {
-        return Ok(());
-    }
-    eprintln!("[paste] text in clipboard — press Ctrl+V to paste");
+
+    // Simulate Ctrl+V directly — no process spawn, no window flash, no focus steal
+    let _ = simulate(&EventType::KeyPress(Key::ControlLeft));
+    let _ = simulate(&EventType::KeyPress(Key::KeyV));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = simulate(&EventType::KeyRelease(Key::KeyV));
+    let _ = simulate(&EventType::KeyRelease(Key::ControlLeft));
+
     Ok(())
 }
 

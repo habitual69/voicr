@@ -1,4 +1,4 @@
-/// Voicr daemon – listens on a Unix socket and processes voice commands.
+/// Voicr daemon – listens on a named pipe (Windows) or Unix socket and processes voice commands.
 ///
 /// Protocol: newline-delimited JSON.
 ///
@@ -26,29 +26,22 @@
 ///   {"type":"status","state":"idle"|"recording"|"transcribing","model":"..."}
 ///   {"type":"shutdown"}
 
-#[cfg(unix)]
 use crate::audio_toolkit::{vad::SmoothedVad, AudioRecorder, SileroVad};
 use crate::config::Config;
 use crate::managers::model::ModelManager;
 use crate::managers::transcription::TranscriptionManager;
 use anyhow::Result;
-use log::{error, info};
-#[cfg(unix)]
-use log::{debug, warn};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-#[cfg(unix)]
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Notify;
 
-#[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+// ── Protocol types ─────────────────────────────────────────────────────────────
 
-// ── Protocol types ────────────────────────────────────────────────────────────
-
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Deserialize)]
 struct Command {
     cmd: String,
@@ -58,7 +51,6 @@ struct Command {
     value: String,
 }
 
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Event {
@@ -92,9 +84,8 @@ enum Event {
     Shutdown,
 }
 
-// ── Daemon state ──────────────────────────────────────────────────────────────
+// ── Daemon state ───────────────────────────────────────────────────────────────
 
-#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Clone, PartialEq)]
 enum DaemonState {
     Idle,
@@ -102,7 +93,12 @@ enum DaemonState {
     Transcribing,
 }
 
-type Clients = Arc<Mutex<Vec<Arc<Mutex<Box<dyn Write + Send>>>>>>;
+// ── Client broadcast infrastructure ───────────────────────────────────────────
+
+static CLIENT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Each entry is (client_id, sender). broadcast() retains only live senders.
+type Clients = Arc<Mutex<Vec<(u64, UnboundedSender<String>)>>>;
 
 fn broadcast(clients: &Clients, event: &Event) {
     let json = match serde_json::to_string(event) {
@@ -112,29 +108,21 @@ fn broadcast(clients: &Clients, event: &Event) {
             return;
         }
     };
-
     let mut list = clients.lock().unwrap();
-    list.retain(|client| {
-        let mut c = client.lock().unwrap();
-        c.write_all(json.as_bytes()).is_ok()
-    });
+    list.retain(|(_, tx)| tx.send(json.clone()).is_ok());
 }
 
-// ── Main daemon entry point ───────────────────────────────────────────────────
+// ── Main daemon entry point ────────────────────────────────────────────────────
 
-pub fn run_daemon(
+pub async fn run_daemon(
     socket_path: PathBuf,
     config: Arc<Mutex<Config>>,
     model_manager: Arc<ModelManager>,
     vad_model_path: PathBuf,
 ) -> Result<()> {
-    // Remove stale socket
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
     let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_notify = Arc::new(Notify::new());
 
     // Build status callback that broadcasts model events to all clients
     let clients_for_status = clients.clone();
@@ -187,191 +175,245 @@ pub fn run_daemon(
 
     // Set up Ctrl+C / SIGTERM to shutdown gracefully
     let shutdown_clone = shutdown_flag.clone();
-    let socket_path_clone = socket_path.clone();
+    let notify_clone = shutdown_notify.clone();
     ctrlc::set_handler(move || {
         info!("Shutdown signal received");
         shutdown_clone.store(true, Ordering::Relaxed);
-        // Connect to our own socket to unblock the accept() loop
-        #[cfg(unix)]
-        {
-            let _ = std::os::unix::net::UnixStream::connect(&socket_path_clone);
-        }
+        notify_clone.notify_one();
     })
     .ok();
 
-    #[cfg(unix)]
+    let state = Arc::new(Mutex::new(DaemonState::Idle));
+    let recorder: Arc<Mutex<Option<AudioRecorder>>> = Arc::new(Mutex::new(None));
+
+    // ── Spawn hotkey listener for hold-to-talk ──────────────────────────────────
     {
-        let state = Arc::new(Mutex::new(DaemonState::Idle));
-        let recorder: Arc<Mutex<Option<AudioRecorder>>> = Arc::new(Mutex::new(None));
+        let combo_str = config.lock().unwrap().hotkey.combo.clone();
+        let clients_hk = clients.clone();
+        let state_hk = state.clone();
+        let recorder_hk = recorder.clone();
+        let tm_hk = transcription_manager.clone();
+        let config_hk = config.clone();
+        let vad_path_hk = vad_model_path.clone();
 
-        let listener = UnixListener::bind(&socket_path)?;
-        info!("Daemon listening on {:?}", socket_path);
+        if let Ok(hotkey) = crate::hotkey::parse_combo(&combo_str) {
+            let (tx, rx) = std::sync::mpsc::channel::<crate::hotkey::HotkeySignal>();
 
-        // ── Spawn hotkey listener for hold-to-talk ──────────────────────────
-        {
-            let combo_str = config.lock().unwrap().hotkey.combo.clone();
-            let clients_hk = clients.clone();
-            let state_hk = state.clone();
-            let recorder_hk = recorder.clone();
-            let tm_hk = transcription_manager.clone();
-            let config_hk = config.clone();
-            let vad_path_hk = vad_model_path.clone();
-
-            if let Ok(hotkey) = crate::hotkey::parse_combo(&combo_str) {
-                let (tx, rx) = mpsc::channel::<crate::hotkey::HotkeySignal>();
-
-                // Start evdev listener (Linux), fall back to rdev
-                #[cfg(target_os = "linux")]
-                let hotkey_ok = {
-                    let evdev_ok = crate::hotkey::spawn_evdev_listener_pub(&hotkey, tx.clone());
-                    if !evdev_ok && crate::hotkey::detect_display_server() == crate::hotkey::DisplayServer::X11 {
-                        crate::hotkey::spawn_rdev_listener(&hotkey, tx.clone());
-                        true
-                    } else {
-                        evdev_ok
-                    }
-                };
-                #[cfg(not(target_os = "linux"))]
-                let hotkey_ok = {
+            // Start evdev listener (Linux), fall back to rdev on all other platforms
+            #[cfg(target_os = "linux")]
+            let hotkey_ok = {
+                let evdev_ok = crate::hotkey::spawn_evdev_listener_pub(&hotkey, tx.clone());
+                if !evdev_ok
+                    && crate::hotkey::detect_display_server()
+                        == crate::hotkey::DisplayServer::X11
+                {
                     crate::hotkey::spawn_rdev_listener(&hotkey, tx.clone());
                     true
-                };
-
-                if hotkey_ok {
-                    info!("Hotkey [{}] active (hold-to-talk)", combo_str);
                 } else {
-                    warn!("Hotkey [{}] not available — use socket commands instead", combo_str);
+                    evdev_ok
                 }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let hotkey_ok = {
+                crate::hotkey::spawn_rdev_listener(&hotkey, tx.clone());
+                true
+            };
 
-                // Process hotkey signals in a background thread
-                std::thread::spawn(move || {
-                    for signal in rx {
-                        if signal {
-                            // Key pressed → start recording
-                            do_start_recording(
-                                &clients_hk,
-                                &state_hk,
-                                &recorder_hk,
-                                &vad_path_hk,
-                                &config_hk,
-                            );
-                        } else {
-                            // Key released → stop + transcribe + paste
-                            do_stop_transcribe_paste(
-                                &clients_hk,
-                                &state_hk,
-                                &recorder_hk,
-                                &tm_hk,
-                                &config_hk,
-                            );
-                        }
-                    }
-                });
+            if hotkey_ok {
+                info!("Hotkey [{}] active (hold-to-talk)", combo_str);
             } else {
-                warn!("Invalid hotkey combo '{}', hotkey disabled", combo_str);
+                warn!(
+                    "Hotkey [{}] not available — use socket commands instead",
+                    combo_str
+                );
             }
+
+            // Process hotkey signals in a background thread
+            std::thread::spawn(move || {
+                for signal in rx {
+                    if signal {
+                        // Key pressed → start recording
+                        do_start_recording(
+                            &clients_hk,
+                            &state_hk,
+                            &recorder_hk,
+                            &vad_path_hk,
+                            &config_hk,
+                        );
+                    } else {
+                        // Key released → stop + transcribe + paste
+                        do_stop_transcribe_paste(
+                            &clients_hk,
+                            &state_hk,
+                            &recorder_hk,
+                            &tm_hk,
+                            &config_hk,
+                        );
+                    }
+                }
+            });
+        } else {
+            warn!("Invalid hotkey combo '{}', hotkey disabled", combo_str);
+        }
+    }
+
+    // ── Platform-specific IPC accept loop ──────────────────────────────────────
+
+    #[cfg(unix)]
+    {
+        // Remove stale socket file
+        if socket_path.exists() {
+            std::fs::remove_file(&socket_path)?;
+        }
+        let listener = tokio::net::UnixListener::bind(&socket_path)?;
+        info!("Daemon listening on {:?}", socket_path);
+
+        loop {
+            let conn = tokio::select! {
+                result = listener.accept() => match result {
+                    Ok((stream, _)) => stream,
+                    Err(e) => { error!("Accept error: {}", e); continue; }
+                },
+                _ = shutdown_notify.notified() => break,
+            };
+
+            let clients_c = clients.clone();
+            let state_c = state.clone();
+            let tm_c = transcription_manager.clone();
+            let mm_c = model_manager.clone();
+            let config_c = config.clone();
+            let recorder_c = recorder.clone();
+            let vad_c = vad_model_path.clone();
+            let notify_c = shutdown_notify.clone();
+            let flag_c = shutdown_flag.clone();
+
+            tokio::spawn(handle_client(
+                conn, clients_c, state_c, tm_c, mm_c, config_c, recorder_c, vad_c,
+                notify_c, flag_c,
+            ));
         }
 
-        for stream in listener.incoming() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::mem;
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe_name = socket_path.to_string_lossy().into_owned();
+        info!("Daemon listening on {}", pipe_name);
+
+        let mut server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe_name)?;
+
+        loop {
+            let did_connect = tokio::select! {
+                result = server.connect() => match result {
+                    Ok(()) => true,
+                    Err(e) => { error!("Pipe accept error: {}", e); break; }
+                },
+                _ = shutdown_notify.notified() => false,
+            };
+
+            if !did_connect {
+                break;
+            }
+
+            // Create next server instance before handing off the connected one
+            let next = match ServerOptions::new().create(&pipe_name) {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Failed to create next pipe instance: {}", e);
+                    break;
+                }
+            };
+            let connected = mem::replace(&mut server, next);
+
             if shutdown_flag.load(Ordering::Relaxed) {
                 break;
             }
 
-            match stream {
-                Ok(stream) => {
-                    let clients_clone = clients.clone();
-                    let state_clone = state.clone();
-                    let tm_clone = transcription_manager.clone();
-                    let mm_clone = model_manager.clone();
-                    let config_clone = config.clone();
-                    let recorder_clone = recorder.clone();
-                    let vad_path_clone = vad_model_path.clone();
-                    let shutdown_clone = shutdown_flag.clone();
-                    let socket_path_clone = socket_path.clone();
+            let clients_c = clients.clone();
+            let state_c = state.clone();
+            let tm_c = transcription_manager.clone();
+            let mm_c = model_manager.clone();
+            let config_c = config.clone();
+            let recorder_c = recorder.clone();
+            let vad_c = vad_model_path.clone();
+            let notify_c = shutdown_notify.clone();
+            let flag_c = shutdown_flag.clone();
 
-                    std::thread::spawn(move || {
-                        handle_client(
-                            stream,
-                            clients_clone,
-                            state_clone,
-                            tm_clone,
-                            mm_clone,
-                            config_clone,
-                            recorder_clone,
-                            vad_path_clone,
-                            shutdown_clone,
-                            socket_path_clone,
-                        );
-                    });
-                }
-                Err(e) => {
-                    if !shutdown_flag.load(Ordering::Relaxed) {
-                        error!("Accept error: {}", e);
-                    }
-                }
-            }
+            tokio::spawn(handle_client(
+                connected, clients_c, state_c, tm_c, mm_c, config_c, recorder_c, vad_c,
+                notify_c, flag_c,
+            ));
         }
-
-        broadcast(&clients, &Event::Shutdown);
-        // Clean up socket file
-        let _ = std::fs::remove_file(&socket_path);
-        info!("Daemon shut down");
-        // Force exit — evdev listener threads block on device reads and
-        // can't be interrupted, so we exit the process directly.
-        std::process::exit(0);
     }
 
-    #[cfg(not(unix))]
-    {
-        let _ = &vad_model_path;
-        anyhow::bail!("Daemon mode is only supported on Unix systems");
-    }
+    broadcast(&clients, &Event::Shutdown);
+    info!("Daemon shut down");
+    Ok(())
 }
 
-#[cfg(unix)]
-fn handle_client(
-    stream: UnixStream,
+// ── Per-client handler ────────────────────────────────────────────────────────
+
+async fn handle_client<S>(
+    stream: S,
     clients: Clients,
     state: Arc<Mutex<DaemonState>>,
     transcription_manager: Arc<TranscriptionManager>,
-    model_manager: Arc<crate::managers::model::ModelManager>,
+    model_manager: Arc<ModelManager>,
     config: Arc<Mutex<Config>>,
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
     vad_model_path: PathBuf,
+    shutdown_notify: Arc<Notify>,
     shutdown_flag: Arc<AtomicBool>,
-    socket_path: PathBuf,
-) {
-    let write_half = match stream.try_clone() {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to clone stream: {}", e);
-            return;
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
+
+    // Channel used both for broadcast messages and direct responses to this client
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let client_id = CLIENT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    clients.lock().unwrap().push((client_id, tx.clone()));
+
+    // Writer task: drains the channel and writes to the stream
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if write_half.write_all(msg.as_bytes()).await.is_err() {
+                break;
+            }
         }
-    };
+    });
 
-    let client_writer: Arc<Mutex<Box<dyn Write + Send>>> =
-        Arc::new(Mutex::new(Box::new(write_half)));
-    clients.lock().unwrap().push(client_writer.clone());
+    // Reader loop
+    let mut reader = tokio::io::BufReader::new(read_half);
+    let mut line = String::new();
 
-    let reader = BufReader::new(stream);
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break, // EOF — client disconnected
             Err(_) => break,
-        };
+            Ok(_) => {}
+        }
 
-        let cmd: Command = match serde_json::from_str(&line) {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let cmd: Command = match serde_json::from_str(trimmed) {
             Ok(c) => c,
             Err(e) => {
                 let event = Event::Error {
                     message: format!("Invalid command JSON: {}", e),
                 };
                 let json = serde_json::to_string(&event).unwrap_or_default();
-                let _ = client_writer
-                    .lock()
-                    .unwrap()
-                    .write_all(format!("{}\n", json).as_bytes());
+                let _ = tx.send(format!("{}\n", json));
                 continue;
             }
         };
@@ -380,13 +422,7 @@ fn handle_client(
 
         match cmd.cmd.as_str() {
             "start" => {
-                do_start_recording(
-                    &clients,
-                    &state,
-                    &recorder,
-                    &vad_model_path,
-                    &config,
-                );
+                do_start_recording(&clients, &state, &recorder, &vad_model_path, &config);
             }
             "stop" => {
                 do_stop_and_transcribe(
@@ -400,13 +436,9 @@ fn handle_client(
             "toggle" => {
                 let current = state.lock().unwrap().clone();
                 match current {
-                    DaemonState::Idle => do_start_recording(
-                        &clients,
-                        &state,
-                        &recorder,
-                        &vad_model_path,
-                        &config,
-                    ),
+                    DaemonState::Idle => {
+                        do_start_recording(&clients, &state, &recorder, &vad_model_path, &config)
+                    }
                     DaemonState::Recording => do_stop_and_transcribe(
                         &clients,
                         &state,
@@ -429,12 +461,17 @@ fn handle_client(
                 if current == DaemonState::Recording {
                     let mut rec = recorder.lock().unwrap();
                     if let Some(ref mut r) = *rec {
-                        let _ = r.stop(); // discard audio
+                        let _ = r.stop();
                         let _ = r.close();
                     }
                     *rec = None;
                     *state.lock().unwrap() = DaemonState::Idle;
-                    broadcast(&clients, &Event::Recording { state: "cancelled".to_string() });
+                    broadcast(
+                        &clients,
+                        &Event::Recording {
+                            state: "cancelled".to_string(),
+                        },
+                    );
                 }
             }
             "status" => {
@@ -452,19 +489,13 @@ fn handle_client(
                     model,
                 };
                 let json = serde_json::to_string(&event).unwrap_or_default();
-                let _ = client_writer
-                    .lock()
-                    .unwrap()
-                    .write_all(format!("{}\n", json).as_bytes());
+                let _ = tx.send(format!("{}\n", json));
             }
             "models" => {
                 let models = model_manager.get_available_models();
                 let event = Event::Models { models };
                 let json = serde_json::to_string(&event).unwrap_or_default();
-                let _ = client_writer
-                    .lock()
-                    .unwrap()
-                    .write_all(format!("{}\n", json).as_bytes());
+                let _ = tx.send(format!("{}\n", json));
             }
             "set" => {
                 if cmd.key.is_empty() {
@@ -472,10 +503,7 @@ fn handle_client(
                         message: "set requires \"key\" and \"value\" fields".to_string(),
                     };
                     let json = serde_json::to_string(&event).unwrap_or_default();
-                    let _ = client_writer
-                        .lock()
-                        .unwrap()
-                        .write_all(format!("{}\n", json).as_bytes());
+                    let _ = tx.send(format!("{}\n", json));
                 } else {
                     let result = {
                         let mut cfg = config.lock().unwrap();
@@ -506,17 +534,13 @@ fn handle_client(
                         });
                     }
                     let json = serde_json::to_string(&event).unwrap_or_default();
-                    let _ = client_writer
-                        .lock()
-                        .unwrap()
-                        .write_all(format!("{}\n", json).as_bytes());
+                    let _ = tx.send(format!("{}\n", json));
                 }
             }
             "shutdown" => {
                 shutdown_flag.store(true, Ordering::Relaxed);
                 broadcast(&clients, &Event::Shutdown);
-                // Connect to our own socket to unblock the accept() loop
-                let _ = UnixStream::connect(&socket_path);
+                shutdown_notify.notify_one();
                 break;
             }
             unknown => {
@@ -530,12 +554,12 @@ fn handle_client(
         }
     }
 
-    // Remove this client from the list
-    let mut list = clients.lock().unwrap();
-    list.retain(|c| !Arc::ptr_eq(c, &client_writer));
+    // Clean up this client from the broadcast list
+    clients.lock().unwrap().retain(|(id, _)| *id != client_id);
 }
 
-#[cfg(unix)]
+// ── Recording helpers ──────────────────────────────────────────────────────────
+
 fn do_start_recording(
     clients: &Clients,
     state: &Arc<Mutex<DaemonState>>,
@@ -599,11 +623,15 @@ fn do_start_recording(
     *recorder.lock().unwrap() = Some(rec);
     *state.lock().unwrap() = DaemonState::Recording;
     crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStart);
-    broadcast(clients, &Event::Recording { state: "started".to_string() });
+    broadcast(
+        clients,
+        &Event::Recording {
+            state: "started".to_string(),
+        },
+    );
     info!("Recording started");
 }
 
-#[cfg(unix)]
 fn do_stop_and_transcribe(
     clients: &Clients,
     state: &Arc<Mutex<DaemonState>>,
@@ -622,7 +650,6 @@ fn do_stop_and_transcribe(
         return;
     }
 
-    // Stop recording
     let audio = {
         let mut rec = recorder.lock().unwrap();
         let audio = rec.as_ref().and_then(|r| r.stop().ok()).unwrap_or_default();
@@ -634,11 +661,15 @@ fn do_stop_and_transcribe(
     };
 
     crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStop);
-    broadcast(clients, &Event::Recording { state: "stopped".to_string() });
+    broadcast(
+        clients,
+        &Event::Recording {
+            state: "stopped".to_string(),
+        },
+    );
     *state.lock().unwrap() = DaemonState::Transcribing;
     broadcast(clients, &Event::Transcribing);
 
-    // Transcribe in a background thread
     let clients_clone = clients.clone();
     let state_clone = state.clone();
     let tm = transcription_manager.clone();
@@ -650,7 +681,6 @@ fn do_stop_and_transcribe(
                     &clients_clone,
                     &Event::Transcription { text: text.clone() },
                 );
-                // Also print to stdout for piping
                 println!("{}", text);
             }
             Err(e) => {
@@ -668,7 +698,6 @@ fn do_stop_and_transcribe(
 }
 
 /// Stop recording, transcribe, and paste into the active window (used by hotkey).
-#[cfg(unix)]
 fn do_stop_transcribe_paste(
     clients: &Clients,
     state: &Arc<Mutex<DaemonState>>,
@@ -681,7 +710,6 @@ fn do_stop_transcribe_paste(
         return;
     }
 
-    // Stop recording
     let audio = {
         let mut rec = recorder.lock().unwrap();
         let audio = rec.as_ref().and_then(|r| r.stop().ok()).unwrap_or_default();
@@ -693,7 +721,12 @@ fn do_stop_transcribe_paste(
     };
 
     crate::audio_toolkit::sound::play(crate::audio_toolkit::sound::Sound::RecordStop);
-    broadcast(clients, &Event::Recording { state: "stopped".to_string() });
+    broadcast(
+        clients,
+        &Event::Recording {
+            state: "stopped".to_string(),
+        },
+    );
 
     if audio.is_empty() {
         info!("Hotkey: no audio captured");
@@ -730,7 +763,6 @@ fn do_stop_transcribe_paste(
                     .output
                     .append_trailing_space;
 
-                // Brief pause so modifier keys are fully released
                 std::thread::sleep(std::time::Duration::from_millis(200));
 
                 match crate::hotkey::paste_text(&text, trailing) {
@@ -752,7 +784,6 @@ fn do_stop_transcribe_paste(
     });
 }
 
-#[cfg(unix)]
 fn find_device_by_name(name: &str) -> Option<cpal::Device> {
     use crate::audio_toolkit::list_input_devices;
     list_input_devices()

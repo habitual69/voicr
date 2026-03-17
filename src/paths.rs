@@ -34,7 +34,10 @@ pub fn history_db_path() -> Result<PathBuf> {
 }
 
 pub fn socket_path() -> PathBuf {
-    std::env::temp_dir().join("voicr.sock")
+    #[cfg(windows)]
+    return PathBuf::from(r"\\.\pipe\voicr");
+    #[cfg(not(windows))]
+    return std::env::temp_dir().join("voicr.sock");
 }
 
 pub fn pid_path() -> PathBuf {

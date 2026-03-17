@@ -89,15 +89,16 @@ async fn cmd_default(config: Arc<Mutex<Config>>) -> Result<()> {
 // ── Daemon ────────────────────────────────────────────────────────────────────
 
 async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>, foreground: bool) -> Result<()> {
-    // If not foreground, daemonize by re-spawning with --foreground
-    #[cfg(unix)]
+    // If not foreground, re-spawn detached with --foreground
     if !foreground {
+        #[cfg(unix)]
         return daemonize(socket).await;
-    }
 
-    #[cfg(not(unix))]
-    if !foreground {
-        anyhow::bail!("Daemon mode is only supported on Unix systems");
+        #[cfg(windows)]
+        return daemonize_windows(socket).await;
+
+        #[cfg(not(any(unix, windows)))]
+        anyhow::bail!("Daemon background mode is not supported on this platform. Use --foreground.");
     }
 
     // Write PID file
@@ -123,7 +124,7 @@ async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>, foregrou
         }
     };
 
-    let result = daemon::run_daemon(socket_path, config, model_manager, vad_path);
+    let result = daemon::run_daemon(socket_path, config, model_manager, vad_path).await;
 
     // Clean up PID file on exit
     let _ = std::fs::remove_file(&pid_path);
@@ -199,6 +200,81 @@ async fn daemonize(socket: Option<String>) -> Result<()> {
     eprintln!("Stop with: voicr send shutdown");
 
     Ok(())
+}
+
+/// Windows daemonization: re-spawn with --foreground using CREATE_NO_WINDOW.
+#[cfg(windows)]
+async fn daemonize_windows(socket: Option<String>) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+
+    // Check if daemon is already running
+    let pid_path = paths::pid_path();
+    if pid_path.exists() {
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                if is_process_running_windows(pid) {
+                    anyhow::bail!(
+                        "voicr daemon is already running (PID {}). Stop it with: voicr send shutdown",
+                        pid
+                    );
+                }
+            }
+        }
+        // Stale PID file
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    let exe = std::env::current_exe()?;
+    let log_path = paths::daemon_log_path()?;
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_file_err = log_file.try_clone()?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("daemon").arg("--foreground");
+
+    if let Some(ref s) = socket {
+        cmd.arg("--socket").arg(s);
+    }
+
+    if std::env::args().any(|a| a == "--debug" || a == "-d") {
+        cmd.arg("--debug");
+    }
+
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::from(log_file));
+    cmd.stderr(std::process::Stdio::from(log_file_err));
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+
+    let child = cmd.spawn()?;
+
+    let socket_display = socket
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(paths::socket_path);
+
+    eprintln!("voicr daemon started (PID: {})", child.id());
+    eprintln!("Pipe:   {}", socket_display.display());
+    eprintln!("Log:    {}", log_path.display());
+    eprintln!("Stop with: voicr send shutdown");
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_process_running_windows(pid: u32) -> bool {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok();
+    output.map_or(false, |o| {
+        String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())
+    })
 }
 
 // ── One-shot transcription ────────────────────────────────────────────────────
@@ -434,32 +510,41 @@ fn read_wav_file(path: &str) -> Result<Vec<f32>> {
 async fn cmd_send(command: &str, socket: Option<String>, wait: bool) -> Result<()> {
     #[cfg(unix)]
     {
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixStream;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixStream;
 
         let socket_path = socket
             .map(std::path::PathBuf::from)
             .unwrap_or_else(paths::socket_path);
 
-        let mut stream = UnixStream::connect(&socket_path)
-            .map_err(|_| anyhow::anyhow!("Cannot connect to daemon at {:?}. Is it running? Start with: voicr daemon", socket_path))?;
+        let mut stream = UnixStream::connect(&socket_path).await.map_err(|_| {
+            anyhow::anyhow!(
+                "Cannot connect to daemon at {:?}. Is it running? Start with: voicr daemon",
+                socket_path
+            )
+        })?;
 
-        let cmd = serde_json::json!({"cmd": command});
-        writeln!(stream, "{}", cmd)?;
+        let cmd_json = serde_json::json!({"cmd": command});
+        stream
+            .write_all(format!("{}\n", cmd_json).as_bytes())
+            .await?;
 
         if wait || command == "status" {
-            let reader = BufReader::new(stream);
-            for line in reader.lines() {
-                let line = line?;
-                println!("{}", line);
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await? == 0 {
+                    break;
+                }
+                print!("{}", line);
 
-                // Stop reading after first response for status queries
                 if command == "status" {
                     break;
                 }
 
-                // Stop on transcription result or error
-                let val: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let val: serde_json::Value =
+                    serde_json::from_str(line.trim()).unwrap_or_default();
                 let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if matches!(event_type, "transcription" | "error" | "shutdown") {
                     break;
@@ -470,10 +555,72 @@ async fn cmd_send(command: &str, socket: Option<String>, wait: bool) -> Result<(
         return Ok(());
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::windows::named_pipe::ClientOptions;
+
+        let pipe_name = socket
+            .unwrap_or_else(|| paths::socket_path().to_string_lossy().into_owned());
+
+        // Named pipe servers may not be ready yet; retry briefly
+        let mut stream = None;
+        for _ in 0..20 {
+            match ClientOptions::new().open(&pipe_name) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(231) => {
+                    // ERROR_PIPE_BUSY — all instances busy, wait and retry
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(_) => break,
+            }
+        }
+
+        let mut stream = stream.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot connect to daemon at {}. Is it running? Start with: voicr daemon",
+                pipe_name
+            )
+        })?;
+
+        let cmd_json = serde_json::json!({"cmd": command});
+        stream
+            .write_all(format!("{}\n", cmd_json).as_bytes())
+            .await?;
+
+        if wait || command == "status" {
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await? == 0 {
+                    break;
+                }
+                print!("{}", line);
+
+                if command == "status" {
+                    break;
+                }
+
+                let val: serde_json::Value =
+                    serde_json::from_str(line.trim()).unwrap_or_default();
+                let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if matches!(event_type, "transcription" | "error" | "shutdown") {
+                    break;
+                }
+            }
+        }
+
+        return Ok(());
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (command, socket, wait);
-        anyhow::bail!("send command is only supported on Unix systems");
+        anyhow::bail!("send command is not supported on this platform");
     }
 }
 
