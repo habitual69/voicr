@@ -1,6 +1,6 @@
 //! Global push-to-talk hotkey mode.
 
-use crate::audio_toolkit::{vad::SmoothedVad, AudioRecorder, SileroVad};
+use crate::audio_toolkit::AudioRecorder;
 use crate::config::Config;
 use crate::managers::{model::ModelManager, transcription::TranscriptionManager};
 use anyhow::Result;
@@ -609,7 +609,6 @@ fn paste_windows(text: &str) -> Result<()> {
 pub fn run_hotkey(
     config: Arc<Mutex<Config>>,
     model_manager: Arc<ModelManager>,
-    vad_path: Option<std::path::PathBuf>,
     combo_override: Option<String>,
     no_paste: bool,
 ) -> Result<()> {
@@ -731,14 +730,7 @@ pub fn run_hotkey(
                 continue;
             }
 
-            let (vad_enabled, vad_threshold, device_name) = {
-                let cfg = config.lock().unwrap();
-                (
-                    cfg.audio.vad_enabled,
-                    cfg.audio.vad_threshold,
-                    cfg.audio.device.clone(),
-                )
-            };
+            let device_name = config.lock().unwrap().audio.device.clone();
 
             let device = device_name.as_deref().and_then(|n| {
                 crate::audio_toolkit::list_input_devices()
@@ -755,19 +747,6 @@ pub fn run_hotkey(
                     continue;
                 }
             };
-
-            if vad_enabled {
-                if let Some(ref path) = vad_path {
-                    if path.exists() {
-                        if let Ok(silero) = SileroVad::new(path, vad_threshold) {
-                            let smoothed = SmoothedVad::new(Box::new(silero), 15, 15, 2);
-                            rec = rec.with_vad(Box::new(smoothed));
-                        } else {
-                            warn!("VAD model failed to load");
-                        }
-                    }
-                }
-            }
 
             if let Err(e) = rec.open(device).map_err(|e| anyhow::anyhow!("{}", e)) {
                 eprintln!("[error] microphone: {}", e);

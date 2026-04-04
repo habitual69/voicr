@@ -30,6 +30,10 @@ pub struct AudioConfig {
     pub vad_enabled: bool,
     /// Maximum recording duration in seconds (0 = unlimited)
     pub max_duration_secs: u64,
+    /// Frames of silence after speech ends before stopping (1 frame = 30ms). Only used by auto-stop transcription.
+    pub vad_hangover_frames: usize,
+    /// Lead-in frames captured before speech onset. Only used by auto-stop transcription.
+    pub vad_prefill_frames: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +167,8 @@ impl Default for AudioConfig {
             vad_threshold: 0.3,
             vad_enabled: true,
             max_duration_secs: 0,
+            vad_hangover_frames: 8,
+            vad_prefill_frames: 5,
         }
     }
 }
@@ -268,6 +274,14 @@ pub fn set_config_key(config: &mut Config, key: &str, value: &str) -> Result<()>
         "audio.max_duration_secs" => {
             config.audio.max_duration_secs = value.parse::<u64>()
                 .map_err(|_| anyhow::anyhow!("max_duration_secs must be an integer"))?;
+        }
+        "audio.vad_hangover_frames" => {
+            config.audio.vad_hangover_frames = value.parse::<usize>()
+                .map_err(|_| anyhow::anyhow!("vad_hangover_frames must be a positive integer"))?;
+        }
+        "audio.vad_prefill_frames" => {
+            config.audio.vad_prefill_frames = value.parse::<usize>()
+                .map_err(|_| anyhow::anyhow!("vad_prefill_frames must be a positive integer"))?;
         }
         "transcription.language" => config.transcription.language = value.to_string(),
         "transcription.translate_to_english" => {

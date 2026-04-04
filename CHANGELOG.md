@@ -1,3 +1,38 @@
+## What's New in v0.3.2
+
+### Performance: Eliminated VAD overhead in push-to-talk mode
+
+In daemon and hotkey (hold-to-talk) modes, the recording start and stop are controlled entirely by
+the key press and release — VAD has no role in those boundaries. Despite this, Silero VAD was
+running ONNX inference on every 30 ms audio frame during every recording, silently dropping frames
+classified as silence (natural mid-sentence pauses) and adding unnecessary CPU overhead.
+
+**Changes:**
+- Removed VAD from the daemon recording path (`do_start_recording`) — recordings are now raw and
+  unfiltered, preserving natural pauses and reducing CPU usage during hold-to-talk
+- Removed VAD from the standalone hotkey mode (`voicr hotkey` / default `voicr` mode) for the same reason
+- Removed the VAD model download step that was triggered even in daemon/hotkey mode (saves startup time and disk I/O on first run)
+- VAD is **kept** for `voicr transcribe --auto-stop`, where silence detection is genuinely needed to
+  determine when to stop recording
+
+### Configurable VAD parameters for transcribe mode
+
+The VAD hangover and prefill were previously hardcoded at 450 ms each. They are now configurable
+and the defaults have been tuned for faster response:
+
+| Setting | Old (hardcoded) | New default | Effect |
+|---------|----------------|-------------|--------|
+| `audio.vad_hangover_frames` | 15 frames (450 ms) | 8 frames (240 ms) | Stops recording ~210 ms sooner after silence |
+| `audio.vad_prefill_frames` | 15 frames (450 ms) | 5 frames (150 ms) | Shorter lead-in buffer |
+
+```bash
+# Tune for your environment
+voicr config set audio.vad_hangover_frames 8   # 240ms silence before stopping (default)
+voicr config set audio.vad_prefill_frames 5    # 150ms lead-in capture (default)
+```
+
+---
+
 ## What's New in v0.2.2
 
 ### Build Fix

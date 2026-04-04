@@ -11,7 +11,6 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands, ConfigCommands, HistoryCommands, ModelCommands};
 use config::Config;
-use log::error;
 use managers::model::ModelManager;
 use std::sync::{Arc, Mutex};
 
@@ -70,18 +69,9 @@ async fn cmd_default(config: Arc<Mutex<Config>>) -> Result<()> {
         *config.lock().unwrap() = cfg;
     }
 
-    // Ensure VAD model
-    let vad_path = match model_manager.ensure_vad_model().await {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!("Warning: VAD unavailable ({})", e);
-            None
-        }
-    };
-
-    // Run push-to-talk (blocking)
+    // VAD not needed in push-to-talk mode — hotkey controls recording boundaries
     tokio::task::spawn_blocking(move || {
-        hotkey::run_hotkey(config, model_manager, vad_path, None, false)
+        hotkey::run_hotkey(config, model_manager, None, false)
     })
     .await?
 }
@@ -112,19 +102,7 @@ async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>, foregrou
     let model_manager = build_model_manager(config.clone(), true)?;
     let model_manager = Arc::new(model_manager);
 
-    // Ensure VAD model is available
-    let vad_path = {
-        let mm = model_manager.clone();
-        match mm.ensure_vad_model().await {
-            Ok(p) => p,
-            Err(e) => {
-                error!("Failed to download VAD model: {}. VAD will be disabled.", e);
-                mm.vad_model_path() // still pass the path even if it doesn't exist
-            }
-        }
-    };
-
-    let result = daemon::run_daemon(socket_path, config, model_manager, vad_path).await;
+    let result = daemon::run_daemon(socket_path, config, model_manager).await;
 
     // Clean up PID file on exit
     let _ = std::fs::remove_file(&pid_path);
@@ -391,11 +369,13 @@ fn record_from_microphone(
 ) -> Result<Vec<f32>> {
     use audio_toolkit::{vad::SmoothedVad, AudioRecorder, SileroVad};
 
-    let (vad_enabled, vad_threshold, device_name) = {
+    let (vad_enabled, vad_threshold, vad_hangover, vad_prefill, device_name) = {
         let cfg = config.lock().unwrap();
         (
             cfg.audio.vad_enabled,
             cfg.audio.vad_threshold,
+            cfg.audio.vad_hangover_frames,
+            cfg.audio.vad_prefill_frames,
             cfg.audio.device.clone(),
         )
     };
@@ -410,7 +390,7 @@ fn record_from_microphone(
         if let Some(path) = vad_path {
             if path.exists() {
                 if let Ok(silero) = SileroVad::new(path, vad_threshold) {
-                    let smoothed = SmoothedVad::new(Box::new(silero), 15, 15, 2);
+                    let smoothed = SmoothedVad::new(Box::new(silero), vad_prefill, vad_hangover, 2);
                     rec = rec.with_vad(Box::new(smoothed));
                 }
             }
@@ -935,17 +915,9 @@ async fn cmd_hotkey(
 ) -> Result<()> {
     let model_manager = Arc::new(build_model_manager(config.clone(), false)?);
 
-    let vad_path = match model_manager.ensure_vad_model().await {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!("Warning: VAD unavailable ({}). Recording without silence detection.", e);
-            None
-        }
-    };
-
-    // run_hotkey blocks until Ctrl+C
+    // VAD not needed in push-to-talk mode — hotkey controls recording boundaries
     tokio::task::spawn_blocking(move || {
-        hotkey::run_hotkey(config, model_manager, vad_path, combo, no_paste)
+        hotkey::run_hotkey(config, model_manager, combo, no_paste)
     })
     .await?
 }

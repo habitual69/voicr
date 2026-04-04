@@ -26,7 +26,7 @@
 ///   {"type":"status","state":"idle"|"recording"|"transcribing","model":"..."}
 ///   {"type":"shutdown"}
 
-use crate::audio_toolkit::{vad::SmoothedVad, AudioRecorder, SileroVad};
+use crate::audio_toolkit::AudioRecorder;
 use crate::config::Config;
 use crate::managers::model::ModelManager;
 use crate::managers::transcription::TranscriptionManager;
@@ -118,7 +118,6 @@ pub async fn run_daemon(
     socket_path: PathBuf,
     config: Arc<Mutex<Config>>,
     model_manager: Arc<ModelManager>,
-    vad_model_path: PathBuf,
 ) -> Result<()> {
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
     let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -194,7 +193,6 @@ pub async fn run_daemon(
         let recorder_hk = recorder.clone();
         let tm_hk = transcription_manager.clone();
         let config_hk = config.clone();
-        let vad_path_hk = vad_model_path.clone();
 
         if let Ok(hotkey) = crate::hotkey::parse_combo(&combo_str) {
             let (tx, rx) = std::sync::mpsc::channel::<crate::hotkey::HotkeySignal>();
@@ -237,7 +235,6 @@ pub async fn run_daemon(
                             &clients_hk,
                             &state_hk,
                             &recorder_hk,
-                            &vad_path_hk,
                             &config_hk,
                         );
                     } else {
@@ -283,12 +280,11 @@ pub async fn run_daemon(
             let mm_c = model_manager.clone();
             let config_c = config.clone();
             let recorder_c = recorder.clone();
-            let vad_c = vad_model_path.clone();
             let notify_c = shutdown_notify.clone();
             let flag_c = shutdown_flag.clone();
 
             tokio::spawn(handle_client(
-                conn, clients_c, state_c, tm_c, mm_c, config_c, recorder_c, vad_c,
+                conn, clients_c, state_c, tm_c, mm_c, config_c, recorder_c,
                 notify_c, flag_c,
             ));
         }
@@ -341,12 +337,11 @@ pub async fn run_daemon(
             let mm_c = model_manager.clone();
             let config_c = config.clone();
             let recorder_c = recorder.clone();
-            let vad_c = vad_model_path.clone();
             let notify_c = shutdown_notify.clone();
             let flag_c = shutdown_flag.clone();
 
             tokio::spawn(handle_client(
-                connected, clients_c, state_c, tm_c, mm_c, config_c, recorder_c, vad_c,
+                connected, clients_c, state_c, tm_c, mm_c, config_c, recorder_c,
                 notify_c, flag_c,
             ));
         }
@@ -367,7 +362,6 @@ async fn handle_client<S>(
     model_manager: Arc<ModelManager>,
     config: Arc<Mutex<Config>>,
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
-    vad_model_path: PathBuf,
     shutdown_notify: Arc<Notify>,
     shutdown_flag: Arc<AtomicBool>,
 ) where
@@ -422,7 +416,7 @@ async fn handle_client<S>(
 
         match cmd.cmd.as_str() {
             "start" => {
-                do_start_recording(&clients, &state, &recorder, &vad_model_path, &config);
+                do_start_recording(&clients, &state, &recorder, &config);
             }
             "stop" => {
                 do_stop_and_transcribe(
@@ -437,7 +431,7 @@ async fn handle_client<S>(
                 let current = state.lock().unwrap().clone();
                 match current {
                     DaemonState::Idle => {
-                        do_start_recording(&clients, &state, &recorder, &vad_model_path, &config)
+                        do_start_recording(&clients, &state, &recorder, &config)
                     }
                     DaemonState::Recording => do_stop_and_transcribe(
                         &clients,
@@ -564,7 +558,6 @@ fn do_start_recording(
     clients: &Clients,
     state: &Arc<Mutex<DaemonState>>,
     recorder: &Arc<Mutex<Option<AudioRecorder>>>,
-    vad_model_path: &PathBuf,
     config: &Arc<Mutex<Config>>,
 ) {
     let current = state.lock().unwrap().clone();
@@ -578,27 +571,10 @@ fn do_start_recording(
         return;
     }
 
-    let (vad_enabled, vad_threshold, device_name) = {
-        let cfg = config.lock().unwrap();
-        (
-            cfg.audio.vad_enabled,
-            cfg.audio.vad_threshold,
-            cfg.audio.device.clone(),
-        )
-    };
-
+    let device_name = config.lock().unwrap().audio.device.clone();
     let device = device_name.as_deref().and_then(find_device_by_name);
 
     let mut rec = AudioRecorder::new().unwrap();
-
-    if vad_enabled && vad_model_path.exists() {
-        if let Ok(silero) = SileroVad::new(vad_model_path, vad_threshold) {
-            let smoothed = SmoothedVad::new(Box::new(silero), 15, 15, 2);
-            rec = rec.with_vad(Box::new(smoothed));
-        } else {
-            warn!("Failed to load VAD model, recording without VAD");
-        }
-    }
 
     if let Err(e) = rec.open(device) {
         broadcast(
