@@ -14,14 +14,9 @@ No cloud. No API key. No GUI. Runs entirely on your machine.</p>
 
 ---
 
-<!-- Demo video — replace with your recording -->
-> 📹 **Demo coming soon** — drop a screen recording into `video/demo.mp4` and it will embed here.
-
-<!-- Uncomment once video/demo.mp4 is added:
 <div align="center">
-  <video src="video/demo.mp4" autoplay loop muted playsinline width="700"></video>
+  <img src="video/demo.gif" alt="voicr demo" width="700" />
 </div>
--->
 
 ---
 
