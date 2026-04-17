@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="icons/voicr.png" alt="voicr" width="96" />
+
 <h1>voicr</h1>
 
 <p><strong>Press a key. Speak. Release. Your words appear wherever your cursor is.</strong><br>
