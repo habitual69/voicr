@@ -375,16 +375,16 @@ impl TranscriptionManager {
             }
         }
 
-        if !self.is_model_loaded() {
-            return Err(anyhow::anyhow!(
-                "No model loaded. Call ensure_model_loaded() first."
-            ));
-        }
-
         let cfg = self.config.lock().unwrap().clone();
 
         if cfg.cloud.enabled {
             return self.transcribe_cloud(&cfg, audio, st);
+        }
+
+        if !self.is_model_loaded() {
+            return Err(anyhow::anyhow!(
+                "No model loaded. Call ensure_model_loaded() first."
+            ));
         }
 
         let result = {

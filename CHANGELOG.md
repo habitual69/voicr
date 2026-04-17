@@ -1,3 +1,31 @@
+## What's New in v0.3.3
+
+### Fix: Cloud transcription in daemon mode
+
+Running `voicr --cloud` or `voicr daemon --cloud` would transcribe correctly but then print
+`[error] No model loaded. Call ensure_model_loaded() first.` — the transcription was being
+discarded. The `transcribe()` function checked for a loaded local model before routing to the
+cloud path; the cloud check is now first so no local model is needed in cloud mode.
+
+### Fix: Multilingual / Unicode text not pasting
+
+Non-ASCII transcriptions (Hindi, Japanese, Arabic, etc.) were transcribed correctly (visible in
+logs) but nothing appeared in the target window. Keystroke-simulation tools (`ydotool type`,
+`xdotool type`, `dotool type`) work by replaying key codes — there are no key codes for Unicode
+characters outside ASCII, so the type command silently produced nothing.
+
+**New auto-detected paste strategy on Linux:**
+
+| Text content | Method | Latency |
+|---|---|---|
+| ASCII (English etc.) | Keystroke typing (dotool → ydotool → wtype → xdotool) | Zero added latency |
+| Non-ASCII (Unicode) | wtype direct typing (wlroots) or clipboard + Ctrl+V | +80 ms for clipboard settle |
+
+English dictation is completely unaffected. Non-ASCII text is placed in the clipboard and
+Ctrl+V is simulated via whichever tool is available (ydotool → xdotool → dotool).
+
+---
+
 ## What's New in v0.3.2
 
 ### Performance: Eliminated VAD overhead in push-to-talk mode

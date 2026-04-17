@@ -332,43 +332,118 @@ pub fn paste_text(text: &str, append_trailing_space: bool) -> Result<()> {
     Err(anyhow::anyhow!("paste not supported on this platform"))
 }
 
-/// Linux paste — same fallback chain used by Handy:
-///   1. dotool   stdin pipe, no daemon, uinput-based, works everywhere
+/// Linux paste strategy — auto-detected by text content:
+///
+/// ASCII text (English etc.) — zero-latency keystroke typing:
+///   1. dotool   stdin pipe, no daemon, uinput-based
 ///   2. ydotool  uinput via daemon, works everywhere incl. GNOME Wayland
-///   3. wtype    Wayland virtual keyboard (wlroots: sway/hyprland, NOT GNOME)
+///   3. wtype    Wayland virtual keyboard (wlroots only)
 ///   4. xdotool  X11 / XWayland
-///   5. clipboard — last resort, user pastes manually
-///   6. clipboard only — user pastes manually
+///
+/// Non-ASCII text (Unicode, multilingual) — clipboard + Ctrl+V:
+///   1. wtype    Unicode-safe direct typing (wlroots only, no clipboard needed)
+///   2. clipboard + ydotool/xdotool/dotool Ctrl+V
+///   3. clipboard only (manual paste)
 #[cfg(target_os = "linux")]
 fn paste_linux(text: &str) -> Result<()> {
-    // 1. dotool — no daemon, uinput, reads from stdin
-    if type_text_dotool(text) {
-        eprintln!("[paste] via dotool");
-        return Ok(());
+    if text.is_ascii() {
+        // Fast keystroke path — no clipboard, no delay
+        if type_text_dotool(text) {
+            eprintln!("[paste] via dotool");
+            return Ok(());
+        }
+        if type_text_ydotool(text) {
+            eprintln!("[paste] via ydotool");
+            return Ok(());
+        }
+        if type_text_wtype(text) {
+            eprintln!("[paste] via wtype");
+            return Ok(());
+        }
+        if type_text_xdotool(text) {
+            eprintln!("[paste] via xdotool");
+            return Ok(());
+        }
+    } else {
+        // Unicode path — clipboard + Ctrl+V is the only reliable option
+        // wtype can type Unicode directly on wlroots compositors (no clipboard needed)
+        if type_text_wtype(text) {
+            eprintln!("[paste] via wtype");
+            return Ok(());
+        }
+        if let Ok(()) = set_clipboard_linux(text) {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            if ctrl_v_ydotool() {
+                eprintln!("[paste] via clipboard + ydotool Ctrl+V");
+                return Ok(());
+            }
+            if ctrl_v_xdotool() {
+                eprintln!("[paste] via clipboard + xdotool Ctrl+V");
+                return Ok(());
+            }
+            if ctrl_v_dotool() {
+                eprintln!("[paste] via clipboard + dotool Ctrl+V");
+                return Ok(());
+            }
+        }
     }
 
-    // 2. ydotool — uinput via daemon (auto-started)
-    if type_text_ydotool(text) {
-        eprintln!("[paste] via ydotool");
-        return Ok(());
-    }
-
-    // 3. wtype — Wayland virtual keyboard (wlroots only, not GNOME)
-    if type_text_wtype(text) {
-        eprintln!("[paste] via wtype");
-        return Ok(());
-    }
-
-    // 4. xdotool — X11 / XWayland
-    if type_text_xdotool(text) {
-        eprintln!("[paste] via xdotool");
-        return Ok(());
-    }
-
-    // 5. clipboard only
+    // Last resort: clipboard only
     set_clipboard_linux(text)?;
     eprintln!("[paste] clipboard only — press Ctrl+V to paste (no typing tool available)");
     Ok(())
+}
+
+/// Simulate Ctrl+V via ydotool (works on Wayland and X11 via uinput).
+#[cfg(target_os = "linux")]
+fn ctrl_v_ydotool() -> bool {
+    if !crate::setup::cmd_exists("ydotool") {
+        return false;
+    }
+    let _ = ensure_ydotoold();
+    std::process::Command::new("ydotool")
+        .args(["key", "ctrl+v"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Simulate Ctrl+V via xdotool (X11 / XWayland).
+#[cfg(target_os = "linux")]
+fn ctrl_v_xdotool() -> bool {
+    if !crate::setup::cmd_exists("xdotool") {
+        return false;
+    }
+    std::process::Command::new("xdotool")
+        .args(["key", "ctrl+v"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Simulate Ctrl+V via dotool stdin pipe.
+#[cfg(target_os = "linux")]
+fn ctrl_v_dotool() -> bool {
+    use std::io::Write;
+    if !crate::setup::cmd_exists("dotool") {
+        return false;
+    }
+    let Ok(mut child) = std::process::Command::new("dotool")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = writeln!(stdin, "key ctrl+v");
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Type via dotool (stdin pipe, no daemon needed, uses /dev/uinput).
