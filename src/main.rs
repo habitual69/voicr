@@ -20,17 +20,18 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     let log_level = if cli.debug { "debug" } else { "info" };
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or(log_level),
-    )
-    .format_timestamp_secs()
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
+        .format_timestamp_secs()
+        .init();
 
     // Ensure directories exist
     paths::ensure_dirs()?;
 
     // Load config
-    let config = config::load_config()?;
+    let mut config = config::load_config()?;
+    if cli.cloud {
+        config.cloud.enabled = true;
+    }
     let config = Arc::new(Mutex::new(config));
 
     match cli.command {
@@ -45,15 +46,24 @@ async fn main() -> Result<()> {
             no_vad,
             auto_stop,
         }) => cmd_transcribe(config, file, output, duration, no_vad, auto_stop).await,
-        Some(Commands::Send { command, socket, wait }) => {
-            cmd_send(&command, socket, wait).await
-        }
+        Some(Commands::Send {
+            command,
+            socket,
+            wait,
+        }) => cmd_send(&command, socket, wait).await,
         Some(Commands::Model(model_cmd)) => cmd_model(config, model_cmd).await,
         Some(Commands::Config(config_cmd)) => cmd_config(config, config_cmd),
         Some(Commands::History(history_cmd)) => cmd_history(config, history_cmd).await,
         Some(Commands::Devices) => cmd_devices(),
         Some(Commands::Hotkey { combo, no_paste }) => cmd_hotkey(config, combo, no_paste).await,
+        Some(Commands::Setup) => cmd_setup(config).await,
     }
+}
+
+// ── Setup ─────────────────────────────────────────────────────────────────────
+
+async fn cmd_setup(config: Arc<Mutex<Config>>) -> Result<()> {
+    setup::run_interactive_setup(config).await
 }
 
 // ── Default (no-arg) mode ─────────────────────────────────────────────────────
@@ -70,15 +80,17 @@ async fn cmd_default(config: Arc<Mutex<Config>>) -> Result<()> {
     }
 
     // VAD not needed in push-to-talk mode — hotkey controls recording boundaries
-    tokio::task::spawn_blocking(move || {
-        hotkey::run_hotkey(config, model_manager, None, false)
-    })
-    .await?
+    tokio::task::spawn_blocking(move || hotkey::run_hotkey(config, model_manager, None, false))
+        .await?
 }
 
 // ── Daemon ────────────────────────────────────────────────────────────────────
 
-async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>, foreground: bool) -> Result<()> {
+async fn cmd_daemon(
+    config: Arc<Mutex<Config>>,
+    socket: Option<String>,
+    foreground: bool,
+) -> Result<()> {
     // If not foreground, re-spawn detached with --foreground
     if !foreground {
         #[cfg(unix)]
@@ -88,7 +100,9 @@ async fn cmd_daemon(config: Arc<Mutex<Config>>, socket: Option<String>, foregrou
         return daemonize_windows(socket).await;
 
         #[cfg(not(any(unix, windows)))]
-        anyhow::bail!("Daemon background mode is not supported on this platform. Use --foreground.");
+        anyhow::bail!(
+            "Daemon background mode is not supported on this platform. Use --foreground."
+        );
     }
 
     // Write PID file
@@ -152,6 +166,11 @@ async fn daemonize(socket: Option<String>) -> Result<()> {
     // Forward --debug if it was set
     if std::env::args().any(|a| a == "--debug" || a == "-d") {
         cmd.arg("--debug");
+    }
+
+    // Forward --cloud if it was set
+    if std::env::args().any(|a| a == "--cloud") {
+        cmd.arg("--cloud");
     }
 
     cmd.stdin(std::process::Stdio::null());
@@ -223,6 +242,11 @@ async fn daemonize_windows(socket: Option<String>) -> Result<()> {
         cmd.arg("--debug");
     }
 
+    // Forward --cloud if it was set
+    if std::env::args().any(|a| a == "--cloud") {
+        cmd.arg("--cloud");
+    }
+
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::from(log_file));
     cmd.stderr(std::process::Stdio::from(log_file_err));
@@ -272,7 +296,10 @@ async fn cmd_transcribe(
         match model_manager.ensure_vad_model().await {
             Ok(p) => Some(p),
             Err(e) => {
-                eprintln!("Warning: VAD unavailable ({}). Recording without silence detection.", e);
+                eprintln!(
+                    "Warning: VAD unavailable ({}). Recording without silence detection.",
+                    e
+                );
                 None
             }
         }
@@ -523,8 +550,7 @@ async fn cmd_send(command: &str, socket: Option<String>, wait: bool) -> Result<(
                     break;
                 }
 
-                let val: serde_json::Value =
-                    serde_json::from_str(line.trim()).unwrap_or_default();
+                let val: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
                 let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if matches!(event_type, "transcription" | "error" | "shutdown") {
                     break;
@@ -532,7 +558,7 @@ async fn cmd_send(command: &str, socket: Option<String>, wait: bool) -> Result<(
             }
         }
 
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(windows)]
@@ -540,8 +566,8 @@ async fn cmd_send(command: &str, socket: Option<String>, wait: bool) -> Result<(
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::windows::named_pipe::ClientOptions;
 
-        let pipe_name = socket
-            .unwrap_or_else(|| paths::socket_path().to_string_lossy().into_owned());
+        let pipe_name =
+            socket.unwrap_or_else(|| paths::socket_path().to_string_lossy().into_owned());
 
         // Named pipe servers may not be ready yet; retry briefly
         let mut stream = None;
@@ -585,8 +611,7 @@ async fn cmd_send(command: &str, socket: Option<String>, wait: bool) -> Result<(
                     break;
                 }
 
-                let val: serde_json::Value =
-                    serde_json::from_str(line.trim()).unwrap_or_default();
+                let val: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
                 let event_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 if matches!(event_type, "transcription" | "error" | "shutdown") {
                     break;
@@ -615,16 +640,23 @@ async fn cmd_model(config: Arc<Mutex<Config>>, cmd: ModelCommands) -> Result<()>
             let selected = config.lock().unwrap().model.selected.clone();
 
             println!(
-                "{:<32} {:<24} {:>8} {:>8} {:>8}  {}",
-                "ID", "Name", "Size", "Accuracy", "Speed", "Status"
+                "{:<32} {:<24} {:>8} {:>8} {:>8}  Status",
+                "ID", "Name", "Size", "Accuracy", "Speed"
             );
             println!("{}", "-".repeat(100));
 
             for m in &models {
                 let status = if m.is_downloading {
-                    format!("Downloading ({:.0}%)", m.partial_size as f64 / (m.size_mb * 1024 * 1024) as f64 * 100.0)
+                    format!(
+                        "Downloading ({:.0}%)",
+                        m.partial_size as f64 / (m.size_mb * 1024 * 1024) as f64 * 100.0
+                    )
                 } else if m.is_downloaded {
-                    if m.id == selected { "✓ (active)".to_string() } else { "✓ downloaded".to_string() }
+                    if m.id == selected {
+                        "✓ (active)".to_string()
+                    } else {
+                        "✓ downloaded".to_string()
+                    }
                 } else {
                     "not downloaded".to_string()
                 };
@@ -649,8 +681,12 @@ async fn cmd_model(config: Arc<Mutex<Config>>, cmd: ModelCommands) -> Result<()>
         }
 
         ModelCommands::Download { model_id } => {
-            let info = model_manager.get_model_info(&model_id)
-                .ok_or_else(|| anyhow::anyhow!("Unknown model: {}. Run 'voicr model list' to see available models.", model_id))?;
+            let info = model_manager.get_model_info(&model_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown model: {}. Run 'voicr model list' to see available models.",
+                    model_id
+                )
+            })?;
 
             if info.is_downloaded {
                 println!("Model '{}' is already downloaded.", model_id);
@@ -697,7 +733,8 @@ async fn cmd_model(config: Arc<Mutex<Config>>, cmd: ModelCommands) -> Result<()>
         }
 
         ModelCommands::Delete { model_id } => {
-            let info = model_manager.get_model_info(&model_id)
+            let info = model_manager
+                .get_model_info(&model_id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown model: {}", model_id))?;
 
             if !info.is_downloaded {
@@ -710,8 +747,9 @@ async fn cmd_model(config: Arc<Mutex<Config>>, cmd: ModelCommands) -> Result<()>
         }
 
         ModelCommands::Set { model_id } => {
-            let info = model_manager.get_model_info(&model_id)
-                .ok_or_else(|| anyhow::anyhow!("Unknown model: {}. Run 'voicr model list'.", model_id))?;
+            let info = model_manager.get_model_info(&model_id).ok_or_else(|| {
+                anyhow::anyhow!("Unknown model: {}. Run 'voicr model list'.", model_id)
+            })?;
 
             if !info.is_downloaded {
                 anyhow::bail!(
@@ -726,7 +764,8 @@ async fn cmd_model(config: Arc<Mutex<Config>>, cmd: ModelCommands) -> Result<()>
         }
 
         ModelCommands::Info { model_id } => {
-            let info = model_manager.get_model_info(&model_id)
+            let info = model_manager
+                .get_model_info(&model_id)
                 .ok_or_else(|| anyhow::anyhow!("Unknown model: {}", model_id))?;
 
             println!("ID:           {}", info.id);
@@ -788,7 +827,7 @@ async fn cmd_history(config: Arc<Mutex<Config>>, cmd: HistoryCommands) -> Result
             let entries = history.get_history_entries().await?;
             let shown = entries.iter().take(limit);
 
-            println!("{:<6} {:<8} {:<32} {}", "ID", "Saved", "Date", "Transcription");
+            println!("{:<6} {:<8} {:<32} Transcription", "ID", "Saved", "Date");
             println!("{}", "-".repeat(100));
 
             for entry in shown {
@@ -816,27 +855,25 @@ async fn cmd_history(config: Arc<Mutex<Config>>, cmd: HistoryCommands) -> Result
             }
         }
 
-        HistoryCommands::Get { id } => {
-            match history.get_entry_by_id(id).await? {
-                Some(entry) => {
-                    println!("ID:          {}", entry.id);
-                    println!("Date:        {}", entry.title);
-                    println!("Saved:       {}", entry.saved);
-                    println!("File:        {}", entry.file_name);
+        HistoryCommands::Get { id } => match history.get_entry_by_id(id).await? {
+            Some(entry) => {
+                println!("ID:          {}", entry.id);
+                println!("Date:        {}", entry.title);
+                println!("Saved:       {}", entry.saved);
+                println!("File:        {}", entry.file_name);
+                println!();
+                println!("Transcription:");
+                println!("{}", entry.transcription_text);
+                if let Some(ref pp) = entry.post_processed_text {
                     println!();
-                    println!("Transcription:");
-                    println!("{}", entry.transcription_text);
-                    if let Some(ref pp) = entry.post_processed_text {
-                        println!();
-                        println!("Post-processed:");
-                        println!("{}", pp);
-                    }
-                }
-                None => {
-                    anyhow::bail!("No entry with ID {}", id);
+                    println!("Post-processed:");
+                    println!("{}", pp);
                 }
             }
-        }
+            None => {
+                anyhow::bail!("No entry with ID {}", id);
+            }
+        },
 
         HistoryCommands::Delete { id } => {
             history.delete_entry(id).await?;
@@ -916,10 +953,8 @@ async fn cmd_hotkey(
     let model_manager = Arc::new(build_model_manager(config.clone(), false)?);
 
     // VAD not needed in push-to-talk mode — hotkey controls recording boundaries
-    tokio::task::spawn_blocking(move || {
-        hotkey::run_hotkey(config, model_manager, combo, no_paste)
-    })
-    .await?
+    tokio::task::spawn_blocking(move || hotkey::run_hotkey(config, model_manager, combo, no_paste))
+        .await?
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

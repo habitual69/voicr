@@ -25,7 +25,6 @@
 ///   {"type":"error","message":"..."}
 ///   {"type":"status","state":"idle"|"recording"|"transcribing","model":"..."}
 ///   {"type":"shutdown"}
-
 use crate::audio_toolkit::AudioRecorder;
 use crate::config::Config;
 use crate::managers::model::ModelManager;
@@ -125,29 +124,31 @@ pub async fn run_daemon(
 
     // Build status callback that broadcasts model events to all clients
     let clients_for_status = clients.clone();
-    let status_cb: crate::managers::transcription::StatusCallback =
-        Arc::new(move |status| {
-            use crate::managers::transcription::ModelStatus;
-            let event = match status {
-                ModelStatus::Loading { model_id } => Event::ModelStatus {
-                    status: "loading".to_string(),
-                    model_id: Some(model_id),
-                    model_name: None,
-                },
-                ModelStatus::Loaded { model_id, model_name } => Event::ModelStatus {
-                    status: "loaded".to_string(),
-                    model_id: Some(model_id),
-                    model_name: Some(model_name),
-                },
-                ModelStatus::Unloaded => Event::ModelStatus {
-                    status: "unloaded".to_string(),
-                    model_id: None,
-                    model_name: None,
-                },
-                ModelStatus::Error { message, .. } => Event::Error { message },
-            };
-            broadcast(&clients_for_status, &event);
-        });
+    let status_cb: crate::managers::transcription::StatusCallback = Arc::new(move |status| {
+        use crate::managers::transcription::ModelStatus;
+        let event = match status {
+            ModelStatus::Loading { model_id } => Event::ModelStatus {
+                status: "loading".to_string(),
+                model_id: Some(model_id),
+                model_name: None,
+            },
+            ModelStatus::Loaded {
+                model_id,
+                model_name,
+            } => Event::ModelStatus {
+                status: "loaded".to_string(),
+                model_id: Some(model_id),
+                model_name: Some(model_name),
+            },
+            ModelStatus::Unloaded => Event::ModelStatus {
+                status: "unloaded".to_string(),
+                model_id: None,
+                model_name: None,
+            },
+            ModelStatus::Error { message, .. } => Event::Error { message },
+        };
+        broadcast(&clients_for_status, &event);
+    });
 
     let transcription_manager = Arc::new(TranscriptionManager::new(
         model_manager.clone(),
@@ -202,8 +203,7 @@ pub async fn run_daemon(
             let hotkey_ok = {
                 let evdev_ok = crate::hotkey::spawn_evdev_listener_pub(&hotkey, tx.clone());
                 if !evdev_ok
-                    && crate::hotkey::detect_display_server()
-                        == crate::hotkey::DisplayServer::X11
+                    && crate::hotkey::detect_display_server() == crate::hotkey::DisplayServer::X11
                 {
                     crate::hotkey::spawn_rdev_listener(&hotkey, tx.clone());
                     true
@@ -231,12 +231,7 @@ pub async fn run_daemon(
                 for signal in rx {
                     if signal {
                         // Key pressed → start recording
-                        do_start_recording(
-                            &clients_hk,
-                            &state_hk,
-                            &recorder_hk,
-                            &config_hk,
-                        );
+                        do_start_recording(&clients_hk, &state_hk, &recorder_hk, &config_hk);
                     } else {
                         // Key released → stop + transcribe + paste
                         do_stop_transcribe_paste(
@@ -284,8 +279,7 @@ pub async fn run_daemon(
             let flag_c = shutdown_flag.clone();
 
             tokio::spawn(handle_client(
-                conn, clients_c, state_c, tm_c, mm_c, config_c, recorder_c,
-                notify_c, flag_c,
+                conn, clients_c, state_c, tm_c, mm_c, config_c, recorder_c, notify_c, flag_c,
             ));
         }
 
@@ -341,8 +335,7 @@ pub async fn run_daemon(
             let flag_c = shutdown_flag.clone();
 
             tokio::spawn(handle_client(
-                connected, clients_c, state_c, tm_c, mm_c, config_c, recorder_c,
-                notify_c, flag_c,
+                connected, clients_c, state_c, tm_c, mm_c, config_c, recorder_c, notify_c, flag_c,
             ));
         }
     }
@@ -430,9 +423,7 @@ async fn handle_client<S>(
             "toggle" => {
                 let current = state.lock().unwrap().clone();
                 match current {
-                    DaemonState::Idle => {
-                        do_start_recording(&clients, &state, &recorder, &config)
-                    }
+                    DaemonState::Idle => do_start_recording(&clients, &state, &recorder, &config),
                     DaemonState::Recording => do_stop_and_transcribe(
                         &clients,
                         &state,
@@ -653,10 +644,7 @@ fn do_stop_and_transcribe(
     std::thread::spawn(move || {
         match tm.transcribe(audio) {
             Ok(text) => {
-                broadcast(
-                    &clients_clone,
-                    &Event::Transcription { text: text.clone() },
-                );
+                broadcast(&clients_clone, &Event::Transcription { text: text.clone() });
                 println!("{}", text);
             }
             Err(e) => {
@@ -727,17 +715,10 @@ fn do_stop_transcribe_paste(
                 info!("Hotkey: empty transcription");
             }
             Ok(text) => {
-                broadcast(
-                    &clients_clone,
-                    &Event::Transcription { text: text.clone() },
-                );
+                broadcast(&clients_clone, &Event::Transcription { text: text.clone() });
                 info!("Hotkey: [transcription] {}", text);
 
-                let trailing = config_clone
-                    .lock()
-                    .unwrap()
-                    .output
-                    .append_trailing_space;
+                let trailing = config_clone.lock().unwrap().output.append_trailing_space;
 
                 std::thread::sleep(std::time::Duration::from_millis(200));
 

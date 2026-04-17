@@ -257,20 +257,32 @@ fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) -
 
                         match key {
                             EK::KEY_LEFTCTRL | EK::KEY_RIGHTCTRL => {
-                                if press { c.store(true, Ordering::Relaxed); }
-                                else if release { c.store(false, Ordering::Relaxed); }
+                                if press {
+                                    c.store(true, Ordering::Relaxed);
+                                } else if release {
+                                    c.store(false, Ordering::Relaxed);
+                                }
                             }
                             EK::KEY_LEFTALT | EK::KEY_RIGHTALT => {
-                                if press { a.store(true, Ordering::Relaxed); }
-                                else if release { a.store(false, Ordering::Relaxed); }
+                                if press {
+                                    a.store(true, Ordering::Relaxed);
+                                } else if release {
+                                    a.store(false, Ordering::Relaxed);
+                                }
                             }
                             EK::KEY_LEFTSHIFT | EK::KEY_RIGHTSHIFT => {
-                                if press { s.store(true, Ordering::Relaxed); }
-                                else if release { s.store(false, Ordering::Relaxed); }
+                                if press {
+                                    s.store(true, Ordering::Relaxed);
+                                } else if release {
+                                    s.store(false, Ordering::Relaxed);
+                                }
                             }
                             EK::KEY_LEFTMETA | EK::KEY_RIGHTMETA => {
-                                if press { m.store(true, Ordering::Relaxed); }
-                                else if release { m.store(false, Ordering::Relaxed); }
+                                if press {
+                                    m.store(true, Ordering::Relaxed);
+                                } else if release {
+                                    m.store(false, Ordering::Relaxed);
+                                }
                             }
                             _ => {}
                         }
@@ -513,7 +525,6 @@ fn type_text_xdotool(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-
 /// Write text to the system clipboard on Linux.
 /// On Wayland uses wl-copy (background process handles clipboard ownership);
 /// on X11 uses arboard.
@@ -537,8 +548,7 @@ fn set_clipboard_linux(text: &str) -> Result<()> {
         }
     }
     // X11 or wl-copy missing: use arboard
-    let mut cb = arboard::Clipboard::new()
-        .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
+    let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
     cb.set_text(text)
         .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
     Ok(())
@@ -566,14 +576,16 @@ fn paste_macos(text: &str) -> Result<()> {
         return Ok(());
     }
     // Fallback: clipboard + Cmd+V
-    let mut cb = arboard::Clipboard::new()
-        .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
+    let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
     cb.set_text(text)
         .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
     std::thread::sleep(std::time::Duration::from_millis(80));
     if run_cmd(
         "osascript",
-        &["-e", "tell application \"System Events\" to keystroke \"v\" using {command down}"],
+        &[
+            "-e",
+            "tell application \"System Events\" to keystroke \"v\" using {command down}",
+        ],
     ) {
         return Ok(());
     }
@@ -585,8 +597,7 @@ fn paste_macos(text: &str) -> Result<()> {
 fn paste_windows(text: &str) -> Result<()> {
     use rdev::{simulate, EventType, Key};
 
-    let mut cb = arboard::Clipboard::new()
-        .map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
+    let mut cb = arboard::Clipboard::new().map_err(|e| anyhow::anyhow!("clipboard: {}", e))?;
     cb.set_text(text)
         .map_err(|e| anyhow::anyhow!("clipboard write: {}", e))?;
 
@@ -603,7 +614,6 @@ fn paste_windows(text: &str) -> Result<()> {
     Ok(())
 }
 
-
 // ── Main hotkey runner ────────────────────────────────────────────────────────
 
 pub fn run_hotkey(
@@ -612,8 +622,7 @@ pub fn run_hotkey(
     combo_override: Option<String>,
     no_paste: bool,
 ) -> Result<()> {
-    let combo_str = combo_override
-        .unwrap_or_else(|| config.lock().unwrap().hotkey.combo.clone());
+    let combo_str = combo_override.unwrap_or_else(|| config.lock().unwrap().hotkey.combo.clone());
 
     let hotkey = parse_combo(&combo_str)?;
     let ds = detect_display_server();
@@ -623,9 +632,7 @@ pub fn run_hotkey(
 
     // ── Source 1: evdev (Linux — works on Wayland + X11, needs input group) ──
     #[cfg(target_os = "linux")]
-    let mut global_hotkey_ok = {
-        spawn_evdev_listener(&hotkey, tx.clone())
-    };
+    let mut global_hotkey_ok = { spawn_evdev_listener(&hotkey, tx.clone()) };
 
     // ── Source 2: rdev (macOS / Windows / Linux X11 fallback) ────────────────
     #[cfg(not(target_os = "linux"))]
@@ -793,11 +800,8 @@ pub fn run_hotkey(
                         if no_paste {
                             println!("{}", text);
                         } else {
-                            let trailing = config_clone
-                                .lock()
-                                .unwrap()
-                                .output
-                                .append_trailing_space;
+                            let trailing =
+                                config_clone.lock().unwrap().output.append_trailing_space;
                             // Brief pause so modifier keys are fully released
                             std::thread::sleep(std::time::Duration::from_millis(200));
                             match paste_text(&text, trailing) {
@@ -826,46 +830,38 @@ pub fn spawn_rdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>
     let hotkey2 = hotkey.clone();
 
     std::thread::spawn(move || {
-        let cb = move |event: Event| {
-            match event.event_type {
-                EventType::KeyPress(key) => {
-                    match key {
-                        Key::ControlLeft | Key::ControlRight => {
-                            c2.store(true, Ordering::Relaxed)
-                        }
-                        Key::Alt | Key::AltGr => a2.store(true, Ordering::Relaxed),
-                        Key::ShiftLeft | Key::ShiftRight => {
-                            sh2.store(true, Ordering::Relaxed)
-                        }
-                        Key::MetaLeft | Key::MetaRight => m2.store(true, Ordering::Relaxed),
-                        _ => {}
-                    }
-                    if key == hotkey2.trigger {
-                        let ok = (!hotkey2.need_ctrl || c2.load(Ordering::Relaxed))
-                            && (!hotkey2.need_alt || a2.load(Ordering::Relaxed))
-                            && (!hotkey2.need_shift || sh2.load(Ordering::Relaxed))
-                            && (!hotkey2.need_meta || m2.load(Ordering::Relaxed));
-                        if ok && !active2.swap(true, Ordering::Relaxed) {
-                            let _ = tx.send(true);
-                        }
+        let cb = move |event: Event| match event.event_type {
+            EventType::KeyPress(key) => {
+                match key {
+                    Key::ControlLeft | Key::ControlRight => c2.store(true, Ordering::Relaxed),
+                    Key::Alt | Key::AltGr => a2.store(true, Ordering::Relaxed),
+                    Key::ShiftLeft | Key::ShiftRight => sh2.store(true, Ordering::Relaxed),
+                    Key::MetaLeft | Key::MetaRight => m2.store(true, Ordering::Relaxed),
+                    _ => {}
+                }
+                if key == hotkey2.trigger {
+                    let ok = (!hotkey2.need_ctrl || c2.load(Ordering::Relaxed))
+                        && (!hotkey2.need_alt || a2.load(Ordering::Relaxed))
+                        && (!hotkey2.need_shift || sh2.load(Ordering::Relaxed))
+                        && (!hotkey2.need_meta || m2.load(Ordering::Relaxed));
+                    if ok && !active2.swap(true, Ordering::Relaxed) {
+                        let _ = tx.send(true);
                     }
                 }
-                EventType::KeyRelease(key) => {
-                    match key {
-                        Key::ControlLeft | Key::ControlRight => {
-                            c2.store(false, Ordering::Relaxed)
-                        }
-                        Key::Alt | Key::AltGr => a2.store(false, Ordering::Relaxed),
-                        Key::ShiftLeft | Key::ShiftRight => sh2.store(false, Ordering::Relaxed),
-                        Key::MetaLeft | Key::MetaRight => m2.store(false, Ordering::Relaxed),
-                        _ => {}
-                    }
-                    if key == hotkey2.trigger && active2.swap(false, Ordering::Relaxed) {
-                        let _ = tx.send(false);
-                    }
-                }
-                _ => {}
             }
+            EventType::KeyRelease(key) => {
+                match key {
+                    Key::ControlLeft | Key::ControlRight => c2.store(false, Ordering::Relaxed),
+                    Key::Alt | Key::AltGr => a2.store(false, Ordering::Relaxed),
+                    Key::ShiftLeft | Key::ShiftRight => sh2.store(false, Ordering::Relaxed),
+                    Key::MetaLeft | Key::MetaRight => m2.store(false, Ordering::Relaxed),
+                    _ => {}
+                }
+                if key == hotkey2.trigger && active2.swap(false, Ordering::Relaxed) {
+                    let _ = tx.send(false);
+                }
+            }
+            _ => {}
         };
         if let Err(e) = listen(cb) {
             warn!("rdev listener stopped: {:?}", e);

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub audio: AudioConfig,
     pub model: ModelConfig,
@@ -10,6 +11,28 @@ pub struct Config {
     pub history: HistoryConfig,
     pub output: OutputConfig,
     pub hotkey: HotkeyConfig,
+    pub cloud: CloudConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CloudConfig {
+    /// Whether cloud mode is enabled
+    pub enabled: bool,
+    /// Groq API Key
+    pub groq_api_key: Option<String>,
+    /// Groq model ID
+    pub groq_model: String,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            groq_api_key: None,
+            groq_model: "whisper-large-v3-turbo".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,19 +162,6 @@ pub enum OutputMethod {
 
 // ── Defaults ──────────────────────────────────────────────────────────────────
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            audio: AudioConfig::default(),
-            model: ModelConfig::default(),
-            transcription: TranscriptionConfig::default(),
-            history: HistoryConfig::default(),
-            output: OutputConfig::default(),
-            hotkey: HotkeyConfig::default(),
-        }
-    }
-}
-
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
@@ -257,52 +267,69 @@ pub fn set_config_key(config: &mut Config, key: &str, value: &str) -> Result<()>
                 "10min" | "min10" => ModelUnloadTimeout::Min10,
                 "15min" | "min15" => ModelUnloadTimeout::Min15,
                 "1h" | "hour1" => ModelUnloadTimeout::Hour1,
-                _ => anyhow::bail!("Unknown unload timeout: {}. Use never/immediately/2min/5min/10min/15min/1h", value),
+                _ => anyhow::bail!(
+                    "Unknown unload timeout: {}. Use never/immediately/2min/5min/10min/15min/1h",
+                    value
+                ),
             }
         }
         "audio.device" => {
-            config.audio.device = if value.is_empty() { None } else { Some(value.to_string()) }
+            config.audio.device = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
         }
         "audio.vad_threshold" => {
-            config.audio.vad_threshold = value.parse::<f32>()
-                .map_err(|_| anyhow::anyhow!("vad_threshold must be a float between 0.0 and 1.0"))?;
+            config.audio.vad_threshold = value.parse::<f32>().map_err(|_| {
+                anyhow::anyhow!("vad_threshold must be a float between 0.0 and 1.0")
+            })?;
         }
         "audio.vad_enabled" => {
-            config.audio.vad_enabled = value.parse::<bool>()
+            config.audio.vad_enabled = value
+                .parse::<bool>()
                 .map_err(|_| anyhow::anyhow!("vad_enabled must be true or false"))?;
         }
         "audio.max_duration_secs" => {
-            config.audio.max_duration_secs = value.parse::<u64>()
+            config.audio.max_duration_secs = value
+                .parse::<u64>()
                 .map_err(|_| anyhow::anyhow!("max_duration_secs must be an integer"))?;
         }
         "audio.vad_hangover_frames" => {
-            config.audio.vad_hangover_frames = value.parse::<usize>()
+            config.audio.vad_hangover_frames = value
+                .parse::<usize>()
                 .map_err(|_| anyhow::anyhow!("vad_hangover_frames must be a positive integer"))?;
         }
         "audio.vad_prefill_frames" => {
-            config.audio.vad_prefill_frames = value.parse::<usize>()
+            config.audio.vad_prefill_frames = value
+                .parse::<usize>()
                 .map_err(|_| anyhow::anyhow!("vad_prefill_frames must be a positive integer"))?;
         }
         "transcription.language" => config.transcription.language = value.to_string(),
         "transcription.translate_to_english" => {
-            config.transcription.translate_to_english = value.parse::<bool>()
+            config.transcription.translate_to_english = value
+                .parse::<bool>()
                 .map_err(|_| anyhow::anyhow!("translate_to_english must be true or false"))?;
         }
         "transcription.filter_filler_words" => {
-            config.transcription.filter_filler_words = value.parse::<bool>()
+            config.transcription.filter_filler_words = value
+                .parse::<bool>()
                 .map_err(|_| anyhow::anyhow!("filter_filler_words must be true or false"))?;
         }
         "transcription.word_correction_threshold" => {
-            config.transcription.word_correction_threshold = value.parse::<f64>()
+            config.transcription.word_correction_threshold = value
+                .parse::<f64>()
                 .map_err(|_| anyhow::anyhow!("word_correction_threshold must be a float"))?;
         }
         "transcription.app_language" => config.transcription.app_language = value.to_string(),
         "history.enabled" => {
-            config.history.enabled = value.parse::<bool>()
+            config.history.enabled = value
+                .parse::<bool>()
                 .map_err(|_| anyhow::anyhow!("history.enabled must be true or false"))?;
         }
         "history.limit" => {
-            config.history.limit = value.parse::<usize>()
+            config.history.limit = value
+                .parse::<usize>()
                 .map_err(|_| anyhow::anyhow!("history.limit must be an integer"))?;
         }
         "history.retention" => {
@@ -312,7 +339,10 @@ pub fn set_config_key(config: &mut Config, key: &str, value: &str) -> Result<()>
                 "3days" | "days3" => RecordingRetention::Days3,
                 "2weeks" | "weeks2" => RecordingRetention::Weeks2,
                 "3months" | "months3" => RecordingRetention::Months3,
-                _ => anyhow::bail!("Unknown retention: {}. Use never/preserve_limit/3days/2weeks/3months", value),
+                _ => anyhow::bail!(
+                    "Unknown retention: {}. Use never/preserve_limit/3days/2weeks/3months",
+                    value
+                ),
             }
         }
         "output.method" => {
@@ -320,21 +350,45 @@ pub fn set_config_key(config: &mut Config, key: &str, value: &str) -> Result<()>
                 "stdout" => OutputMethod::Stdout,
                 "clipboard" => OutputMethod::Clipboard,
                 "file" => OutputMethod::File,
-                _ => anyhow::bail!("Unknown output method: {}. Use stdout/clipboard/file", value),
+                _ => anyhow::bail!(
+                    "Unknown output method: {}. Use stdout/clipboard/file",
+                    value
+                ),
             }
         }
         "output.file_path" => {
-            config.output.file_path = if value.is_empty() { None } else { Some(value.to_string()) }
+            config.output.file_path = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
         }
         "output.append_newline" => {
-            config.output.append_newline = value.parse::<bool>()
+            config.output.append_newline = value
+                .parse::<bool>()
                 .map_err(|_| anyhow::anyhow!("append_newline must be true or false"))?;
         }
         "output.append_trailing_space" => {
-            config.output.append_trailing_space = value.parse::<bool>()
+            config.output.append_trailing_space = value
+                .parse::<bool>()
                 .map_err(|_| anyhow::anyhow!("append_trailing_space must be true or false"))?;
         }
         "hotkey.combo" => config.hotkey.combo = value.to_string(),
+        "cloud.enabled" => {
+            config.cloud.enabled = value
+                .parse::<bool>()
+                .map_err(|_| anyhow::anyhow!("cloud.enabled must be true or false"))?;
+        }
+        "cloud.groq_api_key" => {
+            config.cloud.groq_api_key = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        "cloud.groq_model" => {
+            config.cloud.groq_model = value.to_string();
+        }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }
     Ok(())

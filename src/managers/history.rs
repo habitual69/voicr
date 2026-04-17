@@ -113,12 +113,8 @@ impl HistoryManager {
             crate::config::RecordingRetention::PreserveLimit => {
                 self.cleanup_by_count(self.history_limit)
             }
-            crate::config::RecordingRetention::Days3 => {
-                self.cleanup_by_age(3 * 24 * 60 * 60)
-            }
-            crate::config::RecordingRetention::Weeks2 => {
-                self.cleanup_by_age(2 * 7 * 24 * 60 * 60)
-            }
+            crate::config::RecordingRetention::Days3 => self.cleanup_by_age(3 * 24 * 60 * 60),
+            crate::config::RecordingRetention::Weeks2 => self.cleanup_by_age(2 * 7 * 24 * 60 * 60),
             crate::config::RecordingRetention::Months3 => {
                 self.cleanup_by_age(3 * 30 * 24 * 60 * 60)
             }

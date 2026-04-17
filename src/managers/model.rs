@@ -76,14 +76,14 @@ impl ModelManager {
         let mut available_models = HashMap::new();
 
         let whisper_languages: Vec<String> = vec![
-            "en", "zh", "zh-Hans", "zh-Hant", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr",
-            "pl", "ca", "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms",
-            "cs", "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la", "mi", "ml",
-            "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn", "et", "mk", "br", "eu",
-            "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si", "km", "sn",
-            "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
-            "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw",
-            "ln", "ha", "ba", "jw", "su", "yue",
+            "en", "zh", "zh-Hans", "zh-Hant", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl",
+            "ca", "nl", "ar", "sv", "it", "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs",
+            "ro", "da", "hu", "ta", "no", "th", "ur", "hr", "bg", "lt", "la", "mi", "ml", "cy",
+            "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn", "et", "mk", "br", "eu", "is",
+            "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si", "km", "sn", "yo",
+            "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo", "ht",
+            "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln",
+            "ha", "ba", "jw", "su", "yue",
         ]
         .into_iter()
         .map(String::from)
@@ -186,7 +186,8 @@ impl ModelManager {
             ModelInfo {
                 id: "breeze-asr".to_string(),
                 name: "Breeze ASR".to_string(),
-                description: "Optimized for Taiwanese Mandarin. Code-switching support.".to_string(),
+                description: "Optimized for Taiwanese Mandarin. Code-switching support."
+                    .to_string(),
                 filename: "breeze-asr-q5_k.bin".to_string(),
                 url: Some("https://blob.handy.computer/breeze-asr-q5_k.bin".to_string()),
                 size_mb: 1080,
@@ -367,7 +368,8 @@ impl ModelManager {
             ModelInfo {
                 id: "sense-voice-int8".to_string(),
                 name: "SenseVoice".to_string(),
-                description: "Very fast. Chinese, English, Japanese, Korean, Cantonese.".to_string(),
+                description: "Very fast. Chinese, English, Japanese, Korean, Cantonese."
+                    .to_string(),
                 filename: "sense-voice-int8".to_string(),
                 url: Some("https://blob.handy.computer/sense-voice-int8.tar.gz".to_string()),
                 size_mb: 160,
@@ -487,9 +489,7 @@ impl ModelManager {
 
                 model.is_downloaded = model_path.exists() && model_path.is_dir();
                 model.partial_size = if partial_path.exists() {
-                    fs::metadata(&partial_path)
-                        .map(|m| m.len())
-                        .unwrap_or(0)
+                    fs::metadata(&partial_path).map(|m| m.len()).unwrap_or(0)
                 } else {
                     0
                 };
@@ -499,9 +499,7 @@ impl ModelManager {
 
                 model.is_downloaded = model_path.exists();
                 model.partial_size = if partial_path.exists() {
-                    fs::metadata(&partial_path)
-                        .map(|m| m.len())
-                        .unwrap_or(0)
+                    fs::metadata(&partial_path).map(|m| m.len()).unwrap_or(0)
                 } else {
                     0
                 };
@@ -595,7 +593,9 @@ impl ModelManager {
                         .unwrap_or("unknown")
                 );
 
-                let size_mb = fs::metadata(&path).map(|m| m.len() / (1024 * 1024)).unwrap_or(0);
+                let size_mb = fs::metadata(&path)
+                    .map(|m| m.len() / (1024 * 1024))
+                    .unwrap_or(0);
 
                 available_models.insert(
                     model_id.clone(),
@@ -882,6 +882,7 @@ impl ModelManager {
         Ok(vad_path)
     }
 
+    #[allow(dead_code)]
     pub fn vad_model_path(&self) -> PathBuf {
         self.models_dir.join("silero_vad_v4.onnx")
     }

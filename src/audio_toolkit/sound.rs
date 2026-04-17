@@ -25,9 +25,7 @@ pub fn play(sound: Sound) {
 
 fn play_blocking(sound: Sound) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let host = crate::audio_toolkit::get_cpal_host();
-    let device = host
-        .default_output_device()
-        .ok_or("no output device")?;
+    let device = host.default_output_device().ok_or("no output device")?;
 
     let config = device.default_output_config()?;
     let sample_rate = config.sample_rate().0 as f32;

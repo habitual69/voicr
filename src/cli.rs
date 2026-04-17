@@ -14,6 +14,10 @@ pub struct Cli {
     /// Enable verbose debug logging
     #[arg(short, long, global = true)]
     pub debug: bool,
+
+    /// Enable cloud mode (transcription via Groq API)
+    #[arg(long, global = true)]
+    pub cloud: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -91,6 +95,9 @@ pub enum Commands {
         #[arg(long)]
         no_paste: bool,
     },
+
+    /// Run interactive setup wizard
+    Setup,
 }
 
 #[derive(Subcommand, Debug)]

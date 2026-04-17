@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, SystemTime};
+#[cfg(feature = "whisper")]
+use transcribe_rs::engines::whisper::{WhisperEngine, WhisperInferenceParams};
 use transcribe_rs::{
     engines::{
         gigaam::GigaAMEngine,
@@ -25,17 +27,24 @@ use transcribe_rs::{
     },
     TranscriptionEngine,
 };
-#[cfg(feature = "whisper")]
-use transcribe_rs::engines::whisper::{WhisperEngine, WhisperInferenceParams};
 
 pub type StatusCallback = Arc<dyn Fn(ModelStatus) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub enum ModelStatus {
-    Loading { model_id: String },
-    Loaded { model_id: String, model_name: String },
+    Loading {
+        model_id: String,
+    },
+    Loaded {
+        model_id: String,
+        model_name: String,
+    },
     Unloaded,
-    Error { #[allow(dead_code)] model_id: String, message: String },
+    Error {
+        #[allow(dead_code)]
+        model_id: String,
+        message: String,
+    },
 }
 
 enum LoadedEngine {
@@ -126,13 +135,13 @@ impl TranscriptionManager {
                             .unwrap()
                             .as_millis() as u64;
 
-                        if now_ms.saturating_sub(last) > limit_seconds * 1000 {
-                            if manager_cloned.is_model_loaded() {
-                                debug!("Unloading model due to inactivity");
-                                if let Ok(()) = manager_cloned.unload_model() {
-                                    if let Some(cb) = &manager_cloned.status_cb {
-                                        cb(ModelStatus::Unloaded);
-                                    }
+                        if now_ms.saturating_sub(last) > limit_seconds * 1000
+                            && manager_cloned.is_model_loaded()
+                        {
+                            debug!("Unloading model due to inactivity");
+                            if let Ok(()) = manager_cloned.unload_model() {
+                                if let Some(cb) = &manager_cloned.status_cb {
+                                    cb(ModelStatus::Unloaded);
                                 }
                             }
                         }
@@ -202,7 +211,10 @@ impl TranscriptionManager {
             .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
 
         if !model_info.is_downloaded {
-            let msg = format!("Model '{}' is not downloaded. Run: voicr model download {}", model_info.name, model_id);
+            let msg = format!(
+                "Model '{}' is not downloaded. Run: voicr model download {}",
+                model_info.name, model_id
+            );
             if let Some(cb) = &self.status_cb {
                 cb(ModelStatus::Error {
                     model_id: model_id.to_string(),
@@ -292,6 +304,15 @@ impl TranscriptionManager {
 
     /// Load the configured model if not already loaded.
     pub fn ensure_model_loaded(&self) -> Result<()> {
+        let is_cloud = {
+            let cfg = self.config.lock().unwrap();
+            cfg.cloud.enabled
+        };
+
+        if is_cloud {
+            return Ok(());
+        }
+
         // Wait if loading is in progress
         {
             let mut is_loading = self.is_loading.lock().unwrap();
@@ -361,6 +382,10 @@ impl TranscriptionManager {
         }
 
         let cfg = self.config.lock().unwrap().clone();
+
+        if cfg.cloud.enabled {
+            return self.transcribe_cloud(&cfg, audio, st);
+        }
 
         let result = {
             let mut engine_guard = self.lock_engine();
@@ -465,7 +490,10 @@ impl TranscriptionManager {
                         "unknown panic".to_string()
                     };
                     error!("Transcription engine panicked: {}", panic_msg);
-                    *self.current_model_id.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    *self
+                        .current_model_id
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
 
                     if let Some(cb) = &self.status_cb {
                         cb(ModelStatus::Error {
@@ -494,7 +522,9 @@ impl TranscriptionManager {
                     .unwrap_or(false)
             }
             #[cfg(not(feature = "whisper"))]
-            { false }
+            {
+                false
+            }
         };
 
         let corrected = if !cfg.transcription.custom_words.is_empty() && !is_whisper {
@@ -521,7 +551,11 @@ impl TranscriptionManager {
         info!(
             "Transcription done ({}ms): {}",
             st.elapsed().as_millis(),
-            if filtered.is_empty() { "(empty)" } else { &filtered }
+            if filtered.is_empty() {
+                "(empty)"
+            } else {
+                &filtered
+            }
         );
 
         // Maybe unload immediately
@@ -530,6 +564,120 @@ impl TranscriptionManager {
                 warn!("Failed to unload model immediately: {}", e);
             }
         }
+
+        Ok(filtered)
+    }
+
+    fn transcribe_cloud(
+        &self,
+        cfg: &Config,
+        audio: Vec<f32>,
+        st: std::time::Instant,
+    ) -> Result<String> {
+        let api_key = cfg.cloud.groq_api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Groq API key not set. Run: voicr config set cloud.groq_api_key <YOUR_KEY>"
+            )
+        })?;
+
+        // Convert audio to WAV bytes
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::new(&mut cursor, spec)
+            .map_err(|e| anyhow::anyhow!("WAV writer error: {}", e))?;
+        for sample in audio {
+            let s = (sample * 32768.0).clamp(-32768.0, 32767.0);
+            writer
+                .write_sample(s as i16)
+                .map_err(|e| anyhow::anyhow!("WAV write sample error: {}", e))?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| anyhow::anyhow!("WAV finalize error: {}", e))?;
+        let wav_bytes = cursor.into_inner();
+
+        let language = if cfg.transcription.language == "auto" {
+            String::new()
+        } else if cfg.transcription.language == "zh-Hans" || cfg.transcription.language == "zh-Hant"
+        {
+            "zh".to_string()
+        } else {
+            cfg.transcription.language.clone()
+        };
+
+        let prompt = if cfg.transcription.custom_words.is_empty() {
+            String::new()
+        } else {
+            cfg.transcription.custom_words.join(", ")
+        };
+
+        let url = if cfg.transcription.translate_to_english {
+            "https://api.groq.com/openai/v1/audio/translations"
+        } else {
+            "https://api.groq.com/openai/v1/audio/transcriptions"
+        };
+
+        let client = reqwest::blocking::Client::new();
+        let file_part = reqwest::blocking::multipart::Part::bytes(wav_bytes)
+            .file_name("audio.wav")
+            .mime_str("audio/wav")?;
+
+        let mut form = reqwest::blocking::multipart::Form::new()
+            .part("file", file_part)
+            .text("model", cfg.cloud.groq_model.clone())
+            .text("response_format", "json");
+
+        if !language.is_empty() && !cfg.transcription.translate_to_english {
+            form = form.text("language", language);
+        }
+        if !prompt.is_empty() {
+            form = form.text("prompt", prompt);
+        }
+
+        let resp = client
+            .post(url)
+            .bearer_auth(api_key)
+            .multipart(form)
+            .send()?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            return Err(anyhow::anyhow!("Groq API error ({}): {}", status, text));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct GroqResponse {
+            text: String,
+        }
+
+        let groq_resp: GroqResponse = resp.json()?;
+        let corrected = groq_resp.text.trim().to_string();
+
+        let filtered = if cfg.transcription.filter_filler_words {
+            filter_transcription_output(
+                &corrected,
+                &cfg.transcription.app_language,
+                &cfg.transcription.custom_filler_words,
+            )
+        } else {
+            corrected
+        };
+
+        info!(
+            "Cloud transcription done ({}ms): {}",
+            st.elapsed().as_millis(),
+            if filtered.is_empty() {
+                "(empty)"
+            } else {
+                &filtered
+            }
+        );
 
         Ok(filtered)
     }

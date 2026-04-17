@@ -21,12 +21,81 @@ pub async fn ensure_ready(
     Ok(())
 }
 
+pub async fn run_interactive_setup(
+    config_arc: std::sync::Arc<std::sync::Mutex<crate::config::Config>>,
+) -> Result<()> {
+    use std::io::Write;
+    let mut config = config_arc.lock().unwrap().clone();
+
+    println!("--- Voicr Interactive Setup ---");
+    print!("Use Cloud Mode (Groq API) instead of local models? (y/N): ");
+    std::io::stdout().flush()?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    if input.trim().eq_ignore_ascii_case("y") {
+        config.cloud.enabled = true;
+        print!("Enter Groq API Key: ");
+        std::io::stdout().flush()?;
+        let mut key = String::new();
+        std::io::stdin().read_line(&mut key)?;
+        let key = key.trim();
+        if !key.is_empty() {
+            config.cloud.groq_api_key = Some(key.to_string());
+            println!("API key saved.");
+        } else {
+            println!("No API key provided. Cloud mode will fail until a key is set.");
+        }
+
+        println!("\nAvailable Groq Models:");
+        println!("1) whisper-large-v3-turbo (default, fast)");
+        println!("2) whisper-large-v3 (most accurate)");
+        print!("Select a model (1 or 2, default: 1): ");
+        std::io::stdout().flush()?;
+
+        let mut model_choice = String::new();
+        std::io::stdin().read_line(&mut model_choice)?;
+
+        if model_choice.trim() == "2" {
+            config.cloud.groq_model = "whisper-large-v3".to_string();
+            println!("Selected: whisper-large-v3");
+        } else {
+            config.cloud.groq_model = "whisper-large-v3-turbo".to_string();
+            println!("Selected: whisper-large-v3-turbo");
+        }
+
+        println!("Cloud mode enabled.");
+    } else {
+        config.cloud.enabled = false;
+        println!("Local mode selected. Local models will be used.");
+    }
+
+    crate::config::save_config(&config)?;
+    *config_arc.lock().unwrap() = config;
+
+    let mm = crate::managers::model::ModelManager::new(
+        crate::paths::models_dir()?,
+        config_arc.clone(),
+        None,
+    )?;
+
+    // Also run the normal ensure_ready steps (linux uinput, macos access)
+    ensure_ready(&mut config_arc.lock().unwrap(), &mm).await?;
+
+    println!("Setup complete!");
+    Ok(())
+}
+
 // ── Model ─────────────────────────────────────────────────────────────────────
 
 async fn ensure_default_model(
     config: &mut crate::config::Config,
     model_manager: &crate::managers::model::ModelManager,
 ) -> Result<()> {
+    if config.cloud.enabled {
+        return Ok(());
+    }
+
     // Set selected model if none configured
     if config.model.selected.is_empty() {
         config.model.selected = DEFAULT_MODEL.to_string();
@@ -43,34 +112,35 @@ async fn ensure_default_model(
         return Ok(());
     }
 
-    eprintln!("Downloading default model: {} ({} MB) — first run only...", info.name, info.size_mb);
+    eprintln!(
+        "Downloading default model: {} ({} MB) — first run only...",
+        info.name, info.size_mb
+    );
 
     // Show a progress line that updates in place
     let last_pct = std::sync::Arc::new(std::sync::Mutex::new(0u64));
     let last_pct2 = last_pct.clone();
-    let progress_cb: std::sync::Arc<dyn Fn(crate::managers::model::DownloadProgress) + Send + Sync> =
-        std::sync::Arc::new(move |p: crate::managers::model::DownloadProgress| {
-            let pct = p.percentage as u64;
-            let mut last = last_pct2.lock().unwrap();
-            if pct >= *last + 5 || pct == 100 {
-                eprint!(
-                    "\r  {:.0}%  ({:.1} / {:.1} MB)   ",
-                    p.percentage,
-                    p.downloaded as f64 / 1_048_576.0,
-                    p.total as f64 / 1_048_576.0,
-                );
-                *last = pct;
-            }
-        });
+    let progress_cb: std::sync::Arc<
+        dyn Fn(crate::managers::model::DownloadProgress) + Send + Sync,
+    > = std::sync::Arc::new(move |p: crate::managers::model::DownloadProgress| {
+        let pct = p.percentage as u64;
+        let mut last = last_pct2.lock().unwrap();
+        if pct >= *last + 5 || pct == 100 {
+            eprint!(
+                "\r  {:.0}%  ({:.1} / {:.1} MB)   ",
+                p.percentage,
+                p.downloaded as f64 / 1_048_576.0,
+                p.total as f64 / 1_048_576.0,
+            );
+            *last = pct;
+        }
+    });
 
     // Rebuild model manager with progress callback so the download shows progress
     let models_dir = crate::paths::models_dir()?;
     let config_arc = std::sync::Arc::new(std::sync::Mutex::new(config.clone()));
-    let mm_with_progress = crate::managers::model::ModelManager::new(
-        models_dir,
-        config_arc,
-        Some(progress_cb),
-    )?;
+    let mm_with_progress =
+        crate::managers::model::ModelManager::new(models_dir, config_arc, Some(progress_cb))?;
     mm_with_progress.download_model(DEFAULT_MODEL).await?;
     eprintln!("\nModel downloaded");
 
@@ -125,7 +195,6 @@ fn ensure_linux_setup() {
     } else {
         eprintln!("Input group (global hotkey) ready");
     }
-
 }
 
 /// Ensure /dev/uinput is accessible to the `input` group.
@@ -139,7 +208,11 @@ fn ensure_uinput_group_access() {
         return;
     }
     // Already accessible?
-    if std::fs::OpenOptions::new().write(true).open("/dev/uinput").is_ok() {
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/uinput")
+        .is_ok()
+    {
         return;
     }
 
@@ -147,12 +220,21 @@ fn ensure_uinput_group_access() {
 
     // Step 1: Fix permissions RIGHT NOW via pkexec (survives until reboot)
     let chmod_ok = std::process::Command::new("pkexec")
-        .args(["sh", "-c", "chmod 0660 /dev/uinput && chgrp input /dev/uinput"])
+        .args([
+            "sh",
+            "-c",
+            "chmod 0660 /dev/uinput && chgrp input /dev/uinput",
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
         || std::process::Command::new("sudo")
-            .args(["-n", "sh", "-c", "chmod 0660 /dev/uinput && chgrp input /dev/uinput"])
+            .args([
+                "-n",
+                "sh",
+                "-c",
+                "chmod 0660 /dev/uinput && chgrp input /dev/uinput",
+            ])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -164,10 +246,11 @@ fn ensure_uinput_group_access() {
         let tmp = "/tmp/voicr-uinput.rules";
         if std::fs::write(tmp, rule).is_ok() {
             let _ = std::process::Command::new("pkexec")
-                .args(["sh", "-c", &format!(
-                    "cp {} {} && udevadm control --reload-rules",
-                    tmp, rule_path
-                )])
+                .args([
+                    "sh",
+                    "-c",
+                    &format!("cp {} {} && udevadm control --reload-rules", tmp, rule_path),
+                ])
                 .status();
         }
     }
@@ -178,7 +261,9 @@ fn ensure_uinput_group_access() {
         eprintln!("Could not set /dev/uinput permissions automatically.");
         eprintln!("  Run once:");
         eprintln!("    echo 'KERNEL==\"uinput\", GROUP=\"input\", MODE=\"0660\"' | sudo tee /etc/udev/rules.d/99-voicr-uinput.rules");
-        eprintln!("    sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput");
+        eprintln!(
+            "    sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput"
+        );
     }
 }
 
