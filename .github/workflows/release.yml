@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release (e.g. v0.3.3)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -33,7 +39,19 @@ jobs:
             artifact: voicr-windows-x86_64
 
     steps:
+      - name: Resolve ref
+        id: ref
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -89,7 +107,18 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve ref
+        id: ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ref.outputs.tag }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -99,7 +128,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "voicr ${{ github.ref_name }}"
+          tag_name: ${{ steps.ref.outputs.tag }}
+          name: "voicr ${{ steps.ref.outputs.tag }}"
           body_path: CHANGELOG.md
           files: |
             artifacts/voicr-linux-x86_64/voicr-linux-x86_64
