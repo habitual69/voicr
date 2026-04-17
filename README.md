@@ -3,7 +3,7 @@
 <h1>voicr</h1>
 
 <p><strong>Press a key. Speak. Release. Your words appear wherever your cursor is.</strong><br>
-No cloud. No API key. No GUI. Runs entirely on your machine.</p>
+No GUI. Runs entirely on your machine — or via Groq cloud for faster cold-start.</p>
 
 [![Release](https://img.shields.io/github/v/release/habitual69/voicr?style=flat-square&color=4a90d9)](https://github.com/habitual69/voicr/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -30,7 +30,7 @@ It runs as a **background daemon** you control with a hotkey or a Unix socket. H
 Hold Ctrl+Space → speak → release → text appears in your editor / terminal / browser
 ```
 
-Everything runs locally. Your audio never leaves your machine.
+Run **fully offline** with a local model, or add `--cloud` to route transcription through the Groq API for near-instant results without downloading any model.
 
 ---
 
@@ -39,9 +39,11 @@ Everything runs locally. Your audio never leaves your machine.
 - **Hold-to-talk hotkey** — configurable combo (`Ctrl+Space` by default), pastes into the active window automatically
 - **Daemon mode** — persistent background process, scriptable over a Unix socket with newline-delimited JSON
 - **Multiple engines** — Parakeet, Moonshine (streaming), SenseVoice, GigaAM, Whisper — pick your accuracy/speed trade-off
+- **Cloud mode** — `--cloud` flag routes transcription through [Groq](https://console.groq.com) (no model download required, 100+ language support)
+- **Multilingual paste** — auto-detects Unicode text and uses clipboard + Ctrl+V; ASCII text uses zero-latency keystroke typing
 - **Voice Activity Detection** — silence filtering for `--auto-stop` transcription mode
 - **Transcription history** — SQLite-backed log with search, export, and retention policies
-- **Zero cloud dependency** — fully offline, no API keys, no telemetry
+- **Fully offline option** — local inference, no API keys, no telemetry
 - **Single binary** — one file, no runtime dependencies, works on Linux / macOS / Windows
 
 ---
@@ -113,6 +115,34 @@ voicr
 voicr daemon &
 voicr send toggle        # start recording
 voicr send toggle        # stop and transcribe
+```
+
+---
+
+## Cloud Mode (Groq)
+
+Skip the model download entirely and use [Groq's API](https://console.groq.com) for transcription. Groq runs `whisper-large-v3-turbo` with 100+ language support and near-instant latency.
+
+**Setup**
+```bash
+# Set your Groq API key (get one free at console.groq.com)
+voicr config set cloud.groq_api_key YOUR_API_KEY
+
+# Optional: change the Groq model (default: whisper-large-v3-turbo)
+voicr config set cloud.groq_model whisper-large-v3-turbo
+```
+
+**Use**
+```bash
+voicr --cloud                          # hold-to-talk, cloud transcription
+voicr --cloud hotkey                   # hotkey mode via cloud
+voicr --cloud daemon                   # daemon mode via cloud
+voicr --cloud transcribe               # one-shot via cloud
+```
+
+The `--cloud` flag overrides your `cloud.enabled` config for the current session. To make it permanent:
+```bash
+voicr config set cloud.enabled true
 ```
 
 ---
@@ -285,6 +315,11 @@ append_trailing_space = false
 
 [hotkey]
 combo = "ctrl+space"            # global hotkey combo
+
+[cloud]
+enabled = false                 # use Groq cloud transcription instead of local model
+groq_api_key = ""               # Groq API key (get one free at console.groq.com)
+groq_model = "whisper-large-v3-turbo"  # Groq model to use
 ```
 
 ### Common config examples
@@ -309,6 +344,10 @@ voicr config set audio.vad_hangover_frames 15   # 450ms (more forgiving pauses)
 
 # Keep recordings for 2 weeks only
 voicr config set history.retention 2weeks
+
+# Enable cloud mode permanently
+voicr config set cloud.groq_api_key YOUR_KEY
+voicr config set cloud.enabled true
 ```
 
 ---
@@ -383,6 +422,7 @@ After=sound.target
 
 [Service]
 ExecStart=/usr/local/bin/voicr daemon
+# For cloud mode: ExecStart=/usr/local/bin/voicr --cloud daemon
 Restart=on-failure
 RestartSec=5
 
