@@ -1,6 +1,6 @@
 [package]
 name = "voicr"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 description = "Headless speech-to-text daemon and CLI"
 license = "MIT"
@@ -60,6 +60,9 @@ futures-util = "0.3"
 
 # HTTP (model downloads)
 reqwest = { version = "0.12", features = ["json", "stream", "blocking", "multipart"] }
+
+# HTTP (local config web UI)
+tiny_http = "0.12"
 
 # Archive extraction
 tar = "0.4"

@@ -1,0 +1,784 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voicr config</title>
+<link rel="icon" type="image/png" href="/icon.png">
+<style>
+  :root {
+    color-scheme: light dark;
+    --accent: #1c965a;
+    --accent-strong: #157a48;
+    --bg: #fafaf8;
+    --panel: #ffffff;
+    --border: #e6e2db;
+    --text: #211c16;
+    --muted: #8a8378;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17140f;
+      --panel: #221e18;
+      --border: #362f24;
+      --text: #f1ece2;
+      --muted: #9c9384;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 1.1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  header img { width: 32px; height: 32px; }
+  header h1 { font-size: 1.05rem; margin: 0; letter-spacing: 0.02em; }
+  header .tag { font-size: 0.75rem; color: var(--muted); margin-top: 0.1rem; }
+  header a.gh {
+    margin-left: auto; color: var(--muted); text-decoration: none; font-size: 0.8rem;
+    border: 1px solid var(--border); padding: 0.3rem 0.6rem; border-radius: 6px;
+  }
+  header a.gh:hover { color: var(--text); border-color: var(--accent); }
+
+  .layout { display: flex; max-width: 900px; margin: 0 auto; }
+  nav {
+    width: 170px; flex-shrink: 0; padding: 1.25rem 0.5rem;
+    border-right: 1px solid var(--border);
+  }
+  nav button {
+    display: block; width: 100%; text-align: left;
+    background: none; border: none; color: var(--muted);
+    font: inherit; font-size: 0.85rem; padding: 0.5rem 0.75rem;
+    border-radius: 6px; cursor: pointer; margin-bottom: 0.1rem;
+  }
+  nav button:hover { color: var(--text); background: var(--panel); }
+  nav button.active { color: var(--accent-strong); background: var(--panel); font-weight: 600; }
+
+  main { flex: 1; padding: 1.5rem 1.75rem 6rem; min-width: 0; }
+  .tab { display: none; }
+  .tab.active { display: block; }
+  .tab h2 { font-size: 0.95rem; margin: 0 0 1rem; }
+
+  .row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; padding: 0.55rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+  .row label { flex: 1; font-size: 0.85rem; }
+  .row .hint { display: block; color: var(--muted); font-size: 0.72rem; margin-top: 0.15rem; }
+  input[type=text], input[type=number], input[type=password], select {
+    font: inherit; font-size: 0.85rem; padding: 0.35rem 0.55rem; width: 12rem;
+    border: 1px solid var(--border); border-radius: 5px;
+    background: var(--panel); color: inherit;
+  }
+  input[type=text]:focus, input[type=number]:focus, input[type=password]:focus, select:focus {
+    outline: none; border-color: var(--accent);
+  }
+  input[type=checkbox] { width: 1.1rem; height: 1.1rem; accent-color: var(--accent); }
+
+  button.primary {
+    font: inherit; padding: 0.55rem 1.3rem; border-radius: 6px; border: none;
+    background: var(--accent); color: #fff; cursor: pointer; font-size: 0.85rem;
+  }
+  button.primary:hover { background: var(--accent-strong); }
+  button.secondary {
+    font: inherit; font-size: 0.85rem; padding: 0.55rem 1.1rem; border-radius: 6px;
+    background: transparent; color: var(--text); border: 1px solid var(--border); cursor: pointer;
+    margin-left: 0.6rem;
+  }
+  button.secondary:hover { border-color: var(--accent); color: var(--accent-strong); }
+  button.secondary:disabled { opacity: 0.5; cursor: default; }
+
+  .toast-container {
+    position: fixed; bottom: 5.5rem; right: 1.5rem; z-index: 1000;
+    display: flex; flex-direction: column; gap: 0.5rem; align-items: flex-end;
+  }
+  .toast {
+    display: flex; align-items: center; gap: 0.6rem;
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    color: var(--text); padding: 0.65rem 1rem; border-radius: 8px; font-size: 0.82rem;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2); max-width: 320px;
+    opacity: 0; transform: translateY(6px); transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.error { border-left-color: #d64545; }
+  .toast img { width: 16px; height: 16px; flex-shrink: 0; }
+
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+    display: flex; align-items: center; justify-content: center; z-index: 1001;
+    opacity: 0; pointer-events: none; transition: opacity 0.15s ease;
+  }
+  .modal-backdrop.show { opacity: 1; pointer-events: auto; }
+  .modal-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.5rem; width: 320px; max-width: calc(100vw - 2rem);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.35);
+    transform: scale(0.96); transition: transform 0.15s ease;
+  }
+  .modal-backdrop.show .modal-card { transform: scale(1); }
+  .modal-card .modal-header { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.75rem; }
+  .modal-card .modal-header img { width: 24px; height: 24px; }
+  .modal-card .modal-header h3 { margin: 0; font-size: 0.95rem; }
+  .modal-card p { margin: 0 0 1.25rem; font-size: 0.85rem; color: var(--muted); line-height: 1.4; }
+  .modal-card .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+  .modal-card .modal-actions button.secondary { margin-left: 0; }
+
+  .actions {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: var(--bg); border-top: 1px solid var(--border);
+    padding: 0.9rem 1.75rem; display: flex; align-items: center;
+    max-width: 900px; margin: 0 auto;
+  }
+
+  #models { display: flex; flex-direction: column; gap: 0.15rem; }
+  .model-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 0.5rem 0.6rem; border-radius: 6px; font-size: 0.85rem;
+  }
+  .model-row.clickable:hover { background: var(--panel); cursor: pointer; }
+  .model-row .meta { color: var(--muted); font-size: 0.72rem; flex-shrink: 0; }
+  .model-row .dot { color: var(--accent); margin-right: 0.4rem; }
+  .model-row .name { min-width: 0; }
+  .progress-wrap { display: flex; align-items: center; gap: 0.5rem; flex: 1; margin-left: 1rem; }
+  .progress-track {
+    flex: 1; height: 5px; border-radius: 3px; background: var(--border); overflow: hidden;
+  }
+  .progress-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+  .progress-pct { color: var(--accent-strong); font-size: 0.72rem; width: 2.6rem; text-align: right; }
+</style>
+</head>
+<body>
+<header>
+  <img src="/icon.png" alt="voicr">
+  <div>
+    <h1>voicr</h1>
+    <div class="tag">local config UI</div>
+  </div>
+  <a class="gh" href="https://github.com/habitual69/voicr" target="_blank" rel="noopener">github.com/habitual69/voicr ↗</a>
+</header>
+
+<div class="layout">
+  <nav id="tabs">
+    <button data-tab="model" class="active">Model</button>
+    <button data-tab="hotkey">Hotkey</button>
+    <button data-tab="audio">Audio</button>
+    <button data-tab="transcription">Transcription</button>
+    <button data-tab="output">Output</button>
+    <button data-tab="history">History</button>
+    <button data-tab="cloud">Cloud</button>
+    <button data-tab="web">System</button>
+  </nav>
+
+  <main>
+    <section class="tab active" data-tab="model">
+      <h2>Model</h2>
+      <div id="active-model-banner" style="padding: 1rem; margin-bottom: 1rem; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 0.85rem;">
+        <strong>Current Mode: <span id="active-mode-label">Local</span></strong><br/>
+        <span id="active-mode-desc">Using local downloaded models.</span>
+      </div>
+      <div id="models">loading…</div>
+    </section>
+
+    <section class="tab" data-tab="hotkey">
+      <h2>Hotkey</h2>
+      <div class="row">
+        <label>Global combo<span class="hint">The key combination to start/stop recording (e.g. ctrl+space, alt+shift+r).<br/>Requires daemon restart to take effect. Default: ctrl+space</span></label>
+        <input type="text" data-path="hotkey.combo">
+      </div>
+    </section>
+
+    <section class="tab" data-tab="audio">
+      <h2>Audio</h2>
+      <div class="row">
+        <label>Input device<span class="hint">Select the microphone to record from. Default: System default</span></label>
+        <select data-path="audio.device" id="audio-device-select" data-nullable="true">
+          <option value="">System Default</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Voice Activity Detection (VAD)<span class="hint">Automatically stop recording when you stop speaking. Default: checked</span></label>
+        <input type="checkbox" data-path="audio.vad_enabled">
+      </div>
+      <div class="row">
+        <label>VAD threshold<span class="hint">Sensitivity for voice detection (0.0 to 1.0). Lower is more sensitive. Default: 0.5</span></label>
+        <input type="number" step="0.05" min="0" max="1" data-path="audio.vad_threshold">
+      </div>
+      <div class="row">
+        <label>Max recording duration<span class="hint">Maximum recording time in seconds (0 = unlimited). Default: 0</span></label>
+        <input type="number" min="0" data-path="audio.max_duration_secs">
+      </div>
+    </section>
+
+    <section class="tab" data-tab="transcription">
+      <h2>Transcription</h2>
+      <div class="row">
+        <label>Language<span class="hint">"auto" for auto-detect or a language code (e.g. en, fr, de). Default: auto</span></label>
+        <select data-path="transcription.language">
+          <option value="auto">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+          <option value="de">German</option>
+          <option value="it">Italian</option>
+          <option value="pt">Portuguese</option>
+          <option value="nl">Dutch</option>
+          <option value="ja">Japanese</option>
+          <option value="zh">Chinese</option>
+          <option value="ko">Korean</option>
+          <option value="ru">Russian</option>
+          <option value="hi">Hindi</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Translate to English<span class="hint">Translate the transcribed text to English (if supported by model). Default: unchecked</span></label>
+        <input type="checkbox" data-path="transcription.translate_to_english">
+      </div>
+      <div class="row">
+        <label>Filter filler words<span class="hint">Remove filler words like "um", "uh" from transcription. Default: unchecked</span></label>
+        <input type="checkbox" data-path="transcription.filter_filler_words">
+      </div>
+    </section>
+
+    <section class="tab" data-tab="output">
+      <h2>Output</h2>
+      <div class="row">
+        <label>Delivery method<span class="hint">Where to send the transcribed text. Default: clipboard</span></label>
+        <select data-path="output.method">
+          <option value="stdout">stdout (terminal)</option>
+          <option value="clipboard">clipboard (copy)</option>
+          <option value="file">file</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Append trailing space<span class="hint">Add a space at the end of the transcription (useful for typing). Default: unchecked</span></label>
+        <input type="checkbox" data-path="output.append_trailing_space">
+      </div>
+    </section>
+
+    <section class="tab" data-tab="history">
+      <h2>History</h2>
+      <div class="row">
+        <label>Save history<span class="hint">Save transcriptions to a local SQLite database for later review. Default: checked</span></label>
+        <input type="checkbox" data-path="history.enabled">
+      </div>
+      <div class="row">
+        <label>Entry limit<span class="hint">Maximum number of historical transcriptions to keep (0 = unlimited). Default: 0</span></label>
+        <input type="number" min="0" data-path="history.limit">
+      </div>
+    </section>
+
+    <section class="tab" data-tab="cloud">
+      <h2>Cloud API (Whisper / Sarvam)</h2>
+      <div class="row">
+        <label>Use Cloud API<span class="hint">Use a cloud API for transcription instead of local models. Default: unchecked</span></label>
+        <input type="checkbox" data-path="cloud.enabled">
+      </div>
+      <div class="row">
+        <label>Provider<span class="hint">Select the cloud provider.</span></label>
+        <div style="display: flex; align-items: center; gap: 10px; width: 100%;">
+          <img id="provider-logo" src="/icons/groq.svg" style="width: 24px; height: 24px; object-fit: contain; border-radius: 4px; background: rgba(255,255,255,0.05); padding: 2px;" alt="Logo">
+          <select data-path="cloud.provider" id="provider-select" style="flex: 1;">
+            <option value="groq">Groq</option>
+            <option value="openai">OpenAI</option>
+            <option value="sarvamai">Sarvam AI</option>
+            <option value="custom">Custom (OpenAI-compatible)</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="groq-fields" class="provider-fields">
+        <div class="row">
+          <label>Groq API Key<span class="hint">Starts with gsk_</span></label>
+          <input type="password" data-path="cloud.groq_api_key" data-nullable="true">
+        </div>
+      </div>
+
+      <div id="openai-fields" class="provider-fields" style="display: none;">
+        <div class="row">
+          <label>OpenAI API Key<span class="hint">Starts with sk-</span></label>
+          <input type="password" data-path="cloud.openai_api_key" data-nullable="true">
+        </div>
+      </div>
+
+      <div id="sarvam-fields" class="provider-fields" style="display: none;">
+        <div class="row">
+          <label>Sarvam Subscription Key<span class="hint">Your API subscription key from Sarvam AI dashboard</span></label>
+          <input type="password" data-path="cloud.sarvam_api_key" data-nullable="true">
+        </div>
+      </div>
+
+      <div id="custom-fields" class="provider-fields" style="display: none;">
+        <div class="row">
+          <label>Base URL<span class="hint">e.g. https://api.example.com/v1</span></label>
+          <input type="text" data-path="cloud.custom_base_url" data-nullable="true">
+        </div>
+        <div class="row">
+          <label>API Key<span class="hint">Custom API key</span></label>
+          <input type="password" data-path="cloud.custom_api_key" data-nullable="true">
+        </div>
+      </div>
+
+      <div class="row">
+        <label>Model<span class="hint">Select an available STT model.</span></label>
+        <div style="display: flex; gap: 8px;">
+          <select data-path="cloud.model" id="cloud-model-select" style="flex: 1;">
+            <option value="whisper-large-v3-turbo">whisper-large-v3-turbo (Groq default)</option>
+            <option value="whisper-1">whisper-1 (OpenAI default)</option>
+            <option value="saaras:v3">saaras:v3 (Sarvam default)</option>
+          </select>
+          <button id="fetch-models-btn" class="secondary" style="white-space: nowrap;">Fetch Models</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="tab" data-tab="web">
+      <h2>System & Web UI</h2>
+      <div class="row">
+        <label>Start on login<span class="hint">Automatically start voicr daemon when logging into your computer.</span></label>
+        <input type="checkbox" id="autostart-checkbox">
+      </div>
+      <div class="row">
+        <label>Web UI Port<span class="hint">Local port for this configuration UI. Requires daemon restart. Default: 8080</span></label>
+        <input type="number" min="1" max="65535" data-path="web.port">
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="actions">
+  <button class="primary" id="save">Save</button>
+  <button class="secondary" id="restart" title="Needed for hotkey combo / web port changes to take effect">Restart daemon</button>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+<div class="modal-backdrop" id="modal-backdrop"></div>
+
+<script>
+let config = null;
+
+function get(obj, path) {
+  return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
+}
+function set(obj, path, val) {
+  const keys = path.split('.');
+  const last = keys.pop();
+  const target = keys.reduce((o, k) => o[k], obj);
+  target[last] = val;
+}
+
+const providerLogos = {
+  groq: '/icons/groq.svg',
+  openai: '/icons/openai.svg',
+  sarvamai: '/icons/sarvam.svg',
+  custom: ''
+};
+
+function updateBannerState(isCloudEnabled) {
+  const banner = document.getElementById('active-model-banner');
+  const label = document.getElementById('active-mode-label');
+  const desc = document.getElementById('active-mode-desc');
+  if (banner && label && desc) {
+    if (isCloudEnabled) {
+      const providerNames = {
+        groq: 'Groq',
+        openai: 'OpenAI',
+        sarvamai: 'Sarvam AI',
+        custom: 'Custom'
+      };
+      const p = config && config.cloud ? config.cloud.provider : 'groq';
+      const pName = providerNames[p] || 'Cloud';
+      label.textContent = 'Cloud (' + pName + ')';
+      desc.innerHTML = pName + ' Cloud API is active. Local models listed below will not be used. <a href="#" onclick="document.querySelector(\'[data-tab=cloud]\').click(); return false;" style="color: var(--accent-strong); font-weight: bold;">Configure Cloud</a>';
+      banner.style.borderColor = 'var(--accent)';
+      banner.style.background = 'rgba(28, 150, 90, 0.1)';
+    } else {
+      label.textContent = 'Local';
+      desc.innerHTML = 'Using the selected local model. Cloud API is disabled.';
+      banner.style.borderColor = 'var(--border)';
+      banner.style.background = 'var(--panel)';
+    }
+  }
+}
+
+function populateForm() {
+  document.querySelectorAll('[data-path]').forEach(el => {
+    const val = get(config, el.dataset.path);
+    if (el.type === 'checkbox') {
+      el.checked = !!val;
+    } else {
+      if (el.tagName === 'SELECT' && val != null) {
+        const optionExists = Array.from(el.options).some(o => o.value === val);
+        if (!optionExists && val !== '') {
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = val;
+          el.appendChild(opt);
+        }
+      }
+      el.value = val == null ? '' : val;
+    }
+  });
+  
+  if (config && config.cloud) {
+    updateBannerState(config.cloud.enabled);
+    updateProviderFields(config.cloud.provider || 'groq');
+  }
+}
+
+function updateProviderFields(provider) {
+  document.querySelectorAll('.provider-fields').forEach(el => el.style.display = 'none');
+  let fieldId = 'custom-fields';
+  if (provider === 'groq') fieldId = 'groq-fields';
+  else if (provider === 'openai') fieldId = 'openai-fields';
+  else if (provider === 'sarvamai') fieldId = 'sarvam-fields';
+
+  const el = document.getElementById(fieldId);
+  if (el) el.style.display = 'block';
+
+  const logoEl = document.getElementById('provider-logo');
+  if (logoEl) {
+    if (providerLogos[provider]) {
+      logoEl.src = providerLogos[provider];
+      logoEl.style.display = 'inline-block';
+    } else {
+      logoEl.style.display = 'none';
+    }
+  }
+}
+
+document.addEventListener('change', e => {
+  if (e.target.dataset.path === 'cloud.enabled') {
+    updateBannerState(e.target.checked);
+  } else if (e.target.dataset.path === 'cloud.provider') {
+    updateProviderFields(e.target.value);
+    if (config && config.cloud) {
+      config.cloud.provider = e.target.value;
+      updateBannerState(config.cloud.enabled);
+    }
+  }
+});
+
+document.getElementById('fetch-models-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('fetch-models-btn');
+  btn.disabled = true;
+  btn.textContent = 'Fetching...';
+  
+  // Save current config first so backend has latest API keys to fetch with
+  const saved = await saveConfig();
+  if (!saved) {
+    btn.disabled = false;
+    btn.textContent = 'Fetch Models';
+    return;
+  }
+  
+  try {
+    const res = await fetch('/api/cloud_models', { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to fetch models');
+    
+    const select = document.getElementById('cloud-model-select');
+    // keep current selected value if possible
+    const currentVal = select.value;
+    select.innerHTML = '';
+    
+    if (data.length === 0) {
+      toast('No STT models found for this provider', 'error');
+    } else {
+      for (const m of data) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        select.appendChild(opt);
+      }
+      if (data.includes(currentVal)) {
+        select.value = currentVal;
+      }
+      toast('Models fetched successfully!');
+    }
+  } catch (e) {
+    toast('Error: ' + e.message, 'error');
+  }
+  
+  btn.disabled = false;
+  btn.textContent = 'Fetch Models';
+});
+
+function collectForm() {
+  document.querySelectorAll('[data-path]').forEach(el => {
+    let val;
+    if (el.type === 'checkbox') {
+      val = el.checked;
+    } else if (el.type === 'number') {
+      val = el.value === '' ? 0 : Number(el.value);
+    } else if (el.dataset.nullable === 'true') {
+      val = el.value === '' ? null : el.value;
+    } else {
+      val = el.value;
+    }
+    set(config, el.dataset.path, val);
+  });
+}
+
+async function loadAudioDevices() {
+  try {
+    const res = await fetch('/api/audio_devices', { cache: 'no-store' });
+    const devices = await res.json();
+    const select = document.getElementById('audio-device-select');
+    select.innerHTML = '<option value="">System Default</option>';
+    for (const d of devices) {
+      const opt = document.createElement('option');
+      opt.value = d.name;
+      opt.textContent = d.name + (d.is_default ? ' (System Default)' : '');
+      select.appendChild(opt);
+    }
+  } catch (e) {
+    console.error('Failed to load audio devices', e);
+  }
+}
+
+async function loadConfig() {
+  const res = await fetch('/api/config', { cache: 'no-store' });
+  config = await res.json();
+  await loadAudioDevices();
+  populateForm();
+}
+
+let modelPollTimer = null;
+// Models the UI has just told the server to download, shown as 0% immediately
+// instead of waiting for the next poll to confirm the server picked it up.
+const pendingDownloads = new Set();
+
+function scheduleModelPoll(active) {
+  clearTimeout(modelPollTimer);
+  if (active) {
+    modelPollTimer = setTimeout(loadModels, 700);
+  }
+}
+
+async function loadModels() {
+  const res = await fetch('/api/models', { cache: 'no-store' });
+  const models = await res.json();
+
+  // Model selection has no form field of its own — keep the cached config's
+  // model.selected in sync with the server so Save/Restart (which PUT the
+  // whole cached config back) don't clobber a selection made by clicking here.
+  const active = models.find(m => m.selected);
+  if (active && config) config.model.selected = active.id;
+
+  const container = document.getElementById('models');
+  container.innerHTML = '';
+  if (!models.length) {
+    container.textContent = 'No models available.';
+    return;
+  }
+  let anyDownloading = false;
+  for (const m of models) {
+    const downloading = m.is_downloading || pendingDownloads.has(m.id);
+    if (m.is_downloading) pendingDownloads.delete(m.id);
+    if (downloading) anyDownloading = true;
+
+    const row = document.createElement('div');
+    row.className = 'model-row';
+    const label = document.createElement('span');
+    label.className = 'name';
+    const dot = m.selected ? '●' : downloading ? '◐' : '○';
+    label.innerHTML = '<span class="dot">' + dot + '</span>' + m.name;
+    row.appendChild(label);
+
+    if (downloading) {
+      const pct = m.download_percentage ?? 0;
+      const wrap = document.createElement('span');
+      wrap.className = 'progress-wrap';
+      wrap.innerHTML =
+        '<span class="progress-track"><span class="progress-fill" style="width:' + pct + '%"></span></span>' +
+        '<span class="progress-pct">' + pct.toFixed(0) + '%</span>';
+      row.appendChild(wrap);
+    } else {
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      meta.textContent = m.size_mb + ' MB' + (m.is_recommended ? ' · recommended' : '') +
+        (m.is_downloaded ? '' : ' · not downloaded');
+      row.appendChild(meta);
+
+      if (!m.selected) {
+        row.classList.add('clickable');
+        row.title = m.is_downloaded ? 'Click to select' : 'Click to download and select';
+        row.addEventListener('click', async () => {
+          if (m.is_downloaded) {
+            await fetch('/api/models/select', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: m.id }),
+            });
+          } else {
+            pendingDownloads.add(m.id);
+            await fetch('/api/models/download', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: m.id }),
+            });
+          }
+          loadModels();
+        });
+      }
+    }
+
+    container.appendChild(row);
+  }
+  scheduleModelPoll(anyDownloading);
+}
+
+document.getElementById('tabs').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-tab]');
+  if (!btn) return;
+  const name = btn.dataset.tab;
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b === btn));
+  document.querySelectorAll('main .tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+});
+
+function toast(message, type = 'info', duration = 3000) {
+  const container = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = 'toast' + (type === 'error' ? ' error' : '');
+  el.innerHTML = '<img src="/icon.png" alt=""><span></span>';
+  el.querySelector('span').textContent = message;
+  container.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    setTimeout(() => el.remove(), 200);
+  }, duration);
+}
+
+function confirmDialog(message, { title = 'voicr', confirmLabel = 'Confirm', cancelLabel = 'Cancel' } = {}) {
+  return new Promise(resolve => {
+    const backdrop = document.getElementById('modal-backdrop');
+    backdrop.innerHTML =
+      '<div class="modal-card">' +
+        '<div class="modal-header"><img src="/icon.png" alt=""><h3></h3></div>' +
+        '<p></p>' +
+        '<div class="modal-actions">' +
+          '<button class="secondary" id="modal-cancel"></button>' +
+          '<button class="primary" id="modal-confirm"></button>' +
+        '</div>' +
+      '</div>';
+    backdrop.querySelector('h3').textContent = title;
+    backdrop.querySelector('p').textContent = message;
+    backdrop.querySelector('#modal-cancel').textContent = cancelLabel;
+    backdrop.querySelector('#modal-confirm').textContent = confirmLabel;
+
+    const close = result => {
+      backdrop.classList.remove('show');
+      resolve(result);
+    };
+    backdrop.querySelector('#modal-cancel').addEventListener('click', () => close(false));
+    backdrop.querySelector('#modal-confirm').addEventListener('click', () => close(true));
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) close(false); }, { once: true });
+    requestAnimationFrame(() => backdrop.classList.add('show'));
+  });
+}
+
+async function saveConfig() {
+  collectForm();
+  try {
+    const res = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'save failed');
+    config = data;
+    return true;
+  } catch (e) {
+    toast('Save failed: ' + e.message, 'error');
+    return false;
+  }
+}
+
+document.getElementById('save').addEventListener('click', async () => {
+  if (await saveConfig()) {
+    toast('Settings saved');
+  }
+});
+
+document.getElementById('restart').addEventListener('click', async () => {
+  const ok = await confirmDialog(
+    'This saves your current settings and restarts the daemon. The hotkey will be briefly unavailable.',
+    { title: 'Restart voicr?', confirmLabel: 'Restart', cancelLabel: 'Cancel' }
+  );
+  if (!ok) return;
+
+  const btn = document.getElementById('restart');
+  btn.disabled = true;
+  toast('Saving settings…');
+  if (!(await saveConfig())) {
+    btn.disabled = false;
+    return;
+  }
+  toast('Restarting daemon…');
+  try {
+    await fetch('/api/restart', { method: 'POST' });
+  } catch (e) {
+    // The connection drops as part of the restart — expected, not an error.
+  }
+  // Poll until the daemon is back up, then reload to a clean state.
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const res = await fetch('/api/config', { cache: 'no-store' });
+      if (res.ok) {
+        toast('Back up — reloading');
+        location.reload();
+        return;
+      }
+    } catch (e) {
+      // still down, keep polling
+    }
+  }
+  toast('Still restarting… reload manually in a moment', 'error');
+  btn.disabled = false;
+});
+
+async function loadAutostart() {
+  try {
+    const res = await fetch('/api/autostart', { cache: 'no-store' });
+    const data = await res.json();
+    const cb = document.getElementById('autostart-checkbox');
+    if (cb) cb.checked = !!data.enabled;
+  } catch (e) {
+    console.error('Failed to load autostart status', e);
+  }
+}
+
+document.getElementById('autostart-checkbox').addEventListener('change', async e => {
+  const enabled = e.target.checked;
+  try {
+    const res = await fetch('/api/autostart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to toggle autostart');
+    toast(enabled ? 'Auto-start on login enabled' : 'Auto-start on login disabled');
+  } catch (err) {
+    e.target.checked = !enabled;
+    toast('Error: ' + err.message, 'error');
+  }
+});
+
+loadConfig();
+loadAutostart();
+loadModels();
+</script>
+</body>
+</html>

@@ -1,3 +1,29 @@
+## What's New in v0.4.0
+
+### Local Web UI for Settings & Configuration
+- Built-in embedded web dashboard automatically served alongside `voicr daemon` (at `http://127.0.0.1:7898`).
+- Configure all voicr settings visually without manually editing config files:
+  - Audio input device selection with system default detection
+  - Download and switch local models with live download progress bars
+  - Tune VAD thresholds, hotkey combinations, and language settings
+  - Single-click toggle to save settings and restart the background daemon smoothly
+  - Parameter annotations and helpful hints for all configuration options
+  - Proper HTTP `Cache-Control` headers ensuring the UI stays fresh across restarts
+
+### Multi-Provider Cloud Support (Groq, OpenAI, Sarvam AI, Custom)
+- Added native cloud transcription support for **OpenAI** (`whisper-1`) and **Sarvam AI** (`saaras:v3`, `saaras:v2`).
+- Added support for any **Custom OpenAI-compatible** endpoint (vLLM, LocalAI, etc.).
+- Embedded official provider vector logos (Groq, OpenAI, Sarvam AI) in the Web UI.
+- Built **"Fetch Models"** capability to dynamically retrieve available STT models directly from the selected provider.
+- Added dynamic "Current Mode" banner clearly indicating whether Local or Cloud (and which provider) is active.
+
+### Auto-Start on System Login
+- Added `voicr autostart <enable|disable|status>` CLI subcommand.
+- Added one-click toggle in the Web UI under the System tab.
+- Cross-platform support using XDG Autostart on Linux (`~/.config/autostart/voicr.desktop`), LaunchAgents on macOS, and Startup folder on Windows.
+
+---
+
 ## What's New in v0.3.3
 
 ### Fix: Cloud transcription in daemon mode

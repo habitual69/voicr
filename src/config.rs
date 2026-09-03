@@ -12,6 +12,40 @@ pub struct Config {
     pub output: OutputConfig,
     pub hotkey: HotkeyConfig,
     pub cloud: CloudConfig,
+    pub web: WebConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebConfig {
+    /// Whether the config web UI starts alongside `voicr daemon` (default true)
+    pub enabled: bool,
+    /// Port for the local config web UI (127.0.0.1 only)
+    pub port: u16,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: 7898,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudProvider {
+    Groq,
+    OpenAI,
+    SarvamAI,
+    Custom,
+}
+
+impl Default for CloudProvider {
+    fn default() -> Self {
+        CloudProvider::Groq
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,18 +53,34 @@ pub struct Config {
 pub struct CloudConfig {
     /// Whether cloud mode is enabled
     pub enabled: bool,
+    /// Which cloud provider to use
+    pub provider: CloudProvider,
     /// Groq API Key
     pub groq_api_key: Option<String>,
-    /// Groq model ID
-    pub groq_model: String,
+    /// OpenAI API Key
+    pub openai_api_key: Option<String>,
+    /// Sarvam AI API Key
+    pub sarvam_api_key: Option<String>,
+    /// Custom API Key
+    pub custom_api_key: Option<String>,
+    /// Custom API Base URL
+    pub custom_base_url: Option<String>,
+    /// Model ID
+    #[serde(alias = "groq_model")]
+    pub model: String,
 }
 
 impl Default for CloudConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            provider: CloudProvider::Groq,
             groq_api_key: None,
-            groq_model: "whisper-large-v3-turbo".to_string(),
+            openai_api_key: None,
+            sarvam_api_key: None,
+            custom_api_key: None,
+            custom_base_url: None,
+            model: "whisper-large-v3-turbo".to_string(),
         }
     }
 }
@@ -386,8 +436,55 @@ pub fn set_config_key(config: &mut Config, key: &str, value: &str) -> Result<()>
                 Some(value.to_string())
             }
         }
-        "cloud.groq_model" => {
-            config.cloud.groq_model = value.to_string();
+        "cloud.openai_api_key" => {
+            config.cloud.openai_api_key = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        "cloud.sarvam_api_key" => {
+            config.cloud.sarvam_api_key = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        "cloud.custom_api_key" => {
+            config.cloud.custom_api_key = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        "cloud.custom_base_url" => {
+            config.cloud.custom_base_url = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        "cloud.model" | "cloud.groq_model" => {
+            config.cloud.model = value.to_string();
+        }
+        "cloud.provider" => {
+            config.cloud.provider = match value.to_lowercase().as_str() {
+                "groq" => CloudProvider::Groq,
+                "openai" => CloudProvider::OpenAI,
+                "sarvam" | "sarvamai" | "sarvam_ai" => CloudProvider::SarvamAI,
+                "custom" => CloudProvider::Custom,
+                _ => anyhow::bail!("Invalid provider. Use groq, openai, sarvam, or custom"),
+            };
+        }
+        "web.enabled" => {
+            config.web.enabled = value
+                .parse::<bool>()
+                .map_err(|_| anyhow::anyhow!("web.enabled must be true or false"))?;
+        }
+        "web.port" => {
+            config.web.port = value
+                .parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("web.port must be a valid port number"))?;
         }
         _ => anyhow::bail!("Unknown config key: {}", key),
     }

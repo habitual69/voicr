@@ -40,8 +40,10 @@ Run **fully offline** with a local model, or add `--cloud` to route transcriptio
 
 - **Hold-to-talk hotkey** — configurable combo (`Ctrl+Space` by default), pastes into the active window automatically
 - **Daemon mode** — persistent background process, scriptable over a Unix socket with newline-delimited JSON
-- **Multiple engines** — Parakeet, Moonshine (streaming), SenseVoice, GigaAM, Whisper — pick your accuracy/speed trade-off
-- **Cloud mode** — `--cloud` flag routes transcription through [Groq](https://console.groq.com) (no model download required, 100+ language support)
+- **Local Web UI** — built-in web configuration dashboard (`http://127.0.0.1:7898`) to switch models, tune settings, and pick audio devices
+- **Multiple engines** — Parakeet, Moonshine (streaming), SenseVoice, GigaAM, Whisper (including custom `.bin` auto-discovery)
+- **Multi-provider Cloud mode** — route transcription through **Groq**, **OpenAI**, **Sarvam AI**, or any custom OpenAI-compatible endpoint with dynamic model fetching
+- **Auto-start on login** — single-command or one-click toggle to automatically start voicr when logging into your desktop
 - **Multilingual paste** — auto-detects Unicode text and uses clipboard + Ctrl+V; ASCII text uses zero-latency keystroke typing
 - **Voice Activity Detection** — silence filtering for `--auto-stop` transcription mode
 - **Transcription history** — SQLite-backed log with search, export, and retention policies
@@ -121,30 +123,45 @@ voicr send toggle        # stop and transcribe
 
 ---
 
-## Cloud Mode (Groq)
+## Cloud Mode (Groq, OpenAI, Sarvam AI, Custom)
 
-Skip the model download entirely and use [Groq's API](https://console.groq.com) for transcription. Groq runs `whisper-large-v3-turbo` with 100+ language support and near-instant latency.
+Skip local model downloads and route transcription through cloud APIs for near-instant latency and high accuracy:
 
-**Setup**
+- **⚡ Groq:** Ultra-fast inference with `whisper-large-v3-turbo` or `whisper-large-v3`.
+- **🟩 OpenAI:** Standard cloud transcription with `whisper-1`.
+- **🇮🇳 Sarvam AI:** Optimized transcription for Indian languages and English using `saaras:v3`.
+- **⚙️ Custom:** Any OpenAI-compatible `/audio/transcriptions` endpoint (e.g. self-hosted vLLM or LocalAI).
+
+### Setup via Web UI
+Open the Web UI (`http://127.0.0.1:7898`) while the daemon is running, head to the **Cloud** tab, select your provider, enter your API key, and click **"Fetch Models"** to automatically load available models.
+
+### Setup via CLI
 ```bash
-# Set your Groq API key (get one free at console.groq.com)
-voicr config set cloud.groq_api_key YOUR_API_KEY
+# Choose provider: groq, openai, sarvam, or custom
+voicr config set cloud.provider groq
+voicr config set cloud.groq_api_key YOUR_GROQ_KEY
+voicr config set cloud.model whisper-large-v3-turbo
 
-# Optional: change the Groq model (default: whisper-large-v3-turbo)
-voicr config set cloud.groq_model whisper-large-v3-turbo
+# For OpenAI:
+voicr config set cloud.provider openai
+voicr config set cloud.openai_api_key YOUR_OPENAI_KEY
+voicr config set cloud.model whisper-1
+
+# For Sarvam AI:
+voicr config set cloud.provider sarvam
+voicr config set cloud.sarvam_api_key YOUR_SARVAM_KEY
+voicr config set cloud.model saaras:v3
+
+# Enable cloud mode permanently
+voicr config set cloud.enabled true
 ```
 
-**Use**
+**Use:**
 ```bash
 voicr --cloud                          # hold-to-talk, cloud transcription
 voicr --cloud hotkey                   # hotkey mode via cloud
 voicr --cloud daemon                   # daemon mode via cloud
 voicr --cloud transcribe               # one-shot via cloud
-```
-
-The `--cloud` flag overrides your `cloud.enabled` config for the current session. To make it permanent:
-```bash
-voicr config set cloud.enabled true
 ```
 
 ---
@@ -244,6 +261,35 @@ voicr history export --output out.json
 ```bash
 voicr devices                         # list audio input/output devices
 ```
+
+### `voicr autostart`
+
+Manage automatic startup on system login:
+
+```bash
+voicr autostart enable                # enable launch on system login
+voicr autostart disable               # disable launch on system login
+voicr autostart status                # print current autostart status
+```
+
+---
+
+## Web Configuration UI
+
+When the daemon is running, voicr serves a clean, lightweight web configuration dashboard locally at:
+
+```
+http://127.0.0.1:7898
+```
+
+From the UI, you can:
+- View the active transcription mode (Local model vs Cloud provider)
+- Select your audio input device with system default detection
+- Switch and download local models with real-time download progress
+- Configure and test Cloud providers (Groq, OpenAI, Sarvam AI, Custom) and fetch their STT models
+- Tune VAD sensitivity, hotkey combos, language detection, and output targets
+- Toggle system login autostart with a single click
+- Save settings and restart the background daemon smoothly
 
 ---
 

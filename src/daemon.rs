@@ -117,6 +117,7 @@ pub async fn run_daemon(
     socket_path: PathBuf,
     config: Arc<Mutex<Config>>,
     model_manager: Arc<ModelManager>,
+    download_progress: crate::web::DownloadProgressMap,
 ) -> Result<()> {
     let clients: Clients = Arc::new(Mutex::new(Vec::new()));
     let shutdown_flag = Arc::new(AtomicBool::new(false));
@@ -171,6 +172,24 @@ pub async fn run_daemon(
                 error!("Failed to load model: {}", e);
             }
         });
+    }
+
+    // Start the local config web UI (127.0.0.1 only)
+    {
+        let (web_enabled, web_port) = {
+            let cfg = config.lock().unwrap();
+            (cfg.web.enabled, cfg.web.port)
+        };
+        if web_enabled {
+            let runtime_handle = tokio::runtime::Handle::current();
+            crate::web::spawn(
+                config.clone(),
+                model_manager.clone(),
+                download_progress,
+                runtime_handle,
+                web_port,
+            );
+        }
     }
 
     // Set up Ctrl+C / SIGTERM to shutdown gracefully

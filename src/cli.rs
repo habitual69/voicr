@@ -98,6 +98,22 @@ pub enum Commands {
 
     /// Run interactive setup wizard
     Setup,
+
+    /// Manage automatic startup on system login
+    #[command(subcommand)]
+    Autostart(AutostartCommands),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AutostartCommands {
+    /// Enable autostart on system login
+    Enable,
+
+    /// Disable autostart on system login
+    Disable,
+
+    /// Check autostart status
+    Status,
 }
 
 #[derive(Subcommand, Debug)]

@@ -245,10 +245,14 @@ fn spawn_evdev_listener(hotkey: &ParsedHotkey, tx: mpsc::Sender<HotkeySignal>) -
         let active = combo_active.clone();
 
         std::thread::spawn(move || {
+            let device_name = device.name().unwrap_or("unknown").to_string();
             loop {
                 let events = match device.fetch_events() {
                     Ok(e) => e,
-                    Err(_) => break,
+                    Err(e) => {
+                        warn!("evdev listener stopped ({}): {}", device_name, e);
+                        break;
+                    }
                 };
                 for event in events {
                     if let InputEventKind::Key(key) = event.kind() {

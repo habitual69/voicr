@@ -57,10 +57,10 @@ pub async fn run_interactive_setup(
         std::io::stdin().read_line(&mut model_choice)?;
 
         if model_choice.trim() == "2" {
-            config.cloud.groq_model = "whisper-large-v3".to_string();
+            config.cloud.model = "whisper-large-v3".to_string();
             println!("Selected: whisper-large-v3");
         } else {
-            config.cloud.groq_model = "whisper-large-v3-turbo".to_string();
+            config.cloud.model = "whisper-large-v3-turbo".to_string();
             println!("Selected: whisper-large-v3-turbo");
         }
 

@@ -321,8 +321,18 @@ impl TranscriptionManager {
             }
         }
 
+        let configured_id = {
+            let cfg = self.config.lock().unwrap();
+            cfg.model.selected.clone()
+        };
+
         if self.is_model_loaded() {
-            return Ok(());
+            if self.get_current_model().as_deref() == Some(configured_id.as_str()) {
+                return Ok(());
+            }
+            // The selected model changed since the last load (e.g. via the web UI) —
+            // drop the stale engine so the newly selected one gets loaded below.
+            self.unload_model()?;
         }
 
         // Mark as loading
@@ -381,11 +391,9 @@ impl TranscriptionManager {
             return self.transcribe_cloud(&cfg, audio, st);
         }
 
-        if !self.is_model_loaded() {
-            return Err(anyhow::anyhow!(
-                "No model loaded. Call ensure_model_loaded() first."
-            ));
-        }
+        // Pick up a model switched via the CLI/web UI since the last transcription,
+        // not just at startup.
+        self.ensure_model_loaded()?;
 
         let result = {
             let mut engine_guard = self.lock_engine();
@@ -574,12 +582,6 @@ impl TranscriptionManager {
         audio: Vec<f32>,
         st: std::time::Instant,
     ) -> Result<String> {
-        let api_key = cfg.cloud.groq_api_key.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Groq API key not set. Run: voicr config set cloud.groq_api_key <YOUR_KEY>"
-            )
-        })?;
-
         // Convert audio to WAV bytes
         let mut cursor = std::io::Cursor::new(Vec::new());
         let spec = hound::WavSpec {
@@ -601,63 +603,123 @@ impl TranscriptionManager {
             .map_err(|e| anyhow::anyhow!("WAV finalize error: {}", e))?;
         let wav_bytes = cursor.into_inner();
 
-        let language = if cfg.transcription.language == "auto" {
-            String::new()
-        } else if cfg.transcription.language == "zh-Hans" || cfg.transcription.language == "zh-Hant"
-        {
-            "zh".to_string()
-        } else {
-            cfg.transcription.language.clone()
-        };
-
-        let prompt = if cfg.transcription.custom_words.is_empty() {
-            String::new()
-        } else {
-            cfg.transcription.custom_words.join(", ")
-        };
-
-        let url = if cfg.transcription.translate_to_english {
-            "https://api.groq.com/openai/v1/audio/translations"
-        } else {
-            "https://api.groq.com/openai/v1/audio/transcriptions"
-        };
-
         let client = reqwest::blocking::Client::new();
         let file_part = reqwest::blocking::multipart::Part::bytes(wav_bytes)
             .file_name("audio.wav")
             .mime_str("audio/wav")?;
 
-        let mut form = reqwest::blocking::multipart::Form::new()
-            .part("file", file_part)
-            .text("model", cfg.cloud.groq_model.clone())
-            .text("response_format", "json");
+        let resp = match cfg.cloud.provider {
+            crate::config::CloudProvider::SarvamAI => {
+                let key = cfg.cloud.sarvam_api_key.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("Sarvam AI API key not set")
+                })?;
+                let model = if cfg.cloud.model.contains("whisper") || cfg.cloud.model.is_empty() {
+                    "saaras:v3"
+                } else {
+                    &cfg.cloud.model
+                };
+                let mode = if cfg.transcription.translate_to_english {
+                    "translate"
+                } else {
+                    "transcribe"
+                };
 
-        if !language.is_empty() && !cfg.transcription.translate_to_english {
-            form = form.text("language", language);
-        }
-        if !prompt.is_empty() {
-            form = form.text("prompt", prompt);
-        }
+                let mut form = reqwest::blocking::multipart::Form::new()
+                    .part("file", file_part)
+                    .text("model", model.to_string())
+                    .text("mode", mode.to_string());
 
-        let resp = client
-            .post(url)
-            .bearer_auth(api_key)
-            .multipart(form)
-            .send()?;
+                if cfg.transcription.language != "auto" && !cfg.transcription.language.is_empty() {
+                    form = form.text("language_code", cfg.transcription.language.clone());
+                }
+
+                client
+                    .post("https://api.sarvam.ai/speech-to-text")
+                    .header("api-subscription-key", key)
+                    .multipart(form)
+                    .send()?
+            }
+            _ => {
+                let (api_key, base_url) = match cfg.cloud.provider {
+                    crate::config::CloudProvider::Groq => {
+                        let key = cfg.cloud.groq_api_key.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Groq API key not set")
+                        })?;
+                        (key.clone(), "https://api.groq.com/openai/v1".to_string())
+                    }
+                    crate::config::CloudProvider::OpenAI => {
+                        let key = cfg.cloud.openai_api_key.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("OpenAI API key not set")
+                        })?;
+                        (key.clone(), "https://api.openai.com/v1".to_string())
+                    }
+                    crate::config::CloudProvider::Custom => {
+                        let key = cfg.cloud.custom_api_key.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Custom API key not set")
+                        })?;
+                        let url = cfg.cloud.custom_base_url.as_ref().ok_or_else(|| {
+                            anyhow::anyhow!("Custom Base URL not set")
+                        })?;
+                        (key.clone(), url.clone())
+                    }
+                    crate::config::CloudProvider::SarvamAI => unreachable!(),
+                };
+
+                let language = if cfg.transcription.language == "auto" {
+                    String::new()
+                } else if cfg.transcription.language == "zh-Hans" || cfg.transcription.language == "zh-Hant"
+                {
+                    "zh".to_string()
+                } else {
+                    cfg.transcription.language.clone()
+                };
+
+                let prompt = if cfg.transcription.custom_words.is_empty() {
+                    String::new()
+                } else {
+                    cfg.transcription.custom_words.join(", ")
+                };
+
+                let url = if cfg.transcription.translate_to_english {
+                    format!("{}/audio/translations", base_url.trim_end_matches('/'))
+                } else {
+                    format!("{}/audio/transcriptions", base_url.trim_end_matches('/'))
+                };
+
+                let mut form = reqwest::blocking::multipart::Form::new()
+                    .part("file", file_part)
+                    .text("model", cfg.cloud.model.clone())
+                    .text("response_format", "json");
+
+                if !language.is_empty() && !cfg.transcription.translate_to_english {
+                    form = form.text("language", language);
+                }
+                if !prompt.is_empty() {
+                    form = form.text("prompt", prompt);
+                }
+
+                client
+                    .post(url)
+                    .bearer_auth(api_key)
+                    .multipart(form)
+                    .send()?
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
-            return Err(anyhow::anyhow!("Groq API error ({}): {}", status, text));
+            return Err(anyhow::anyhow!("Cloud API error ({}): {}", status, text));
         }
 
         #[derive(serde::Deserialize)]
-        struct GroqResponse {
-            text: String,
+        struct ApiResponse {
+            text: Option<String>,
+            transcript: Option<String>,
         }
 
-        let groq_resp: GroqResponse = resp.json()?;
-        let corrected = groq_resp.text.trim().to_string();
+        let api_resp: ApiResponse = resp.json()?;
+        let corrected = api_resp.text.or(api_resp.transcript).unwrap_or_default().trim().to_string();
 
         let filtered = if cfg.transcription.filter_filler_words {
             filter_transcription_output(

@@ -1,4 +1,5 @@
 mod audio_toolkit;
+pub mod autostart;
 mod cli;
 mod config;
 mod daemon;
@@ -6,10 +7,11 @@ mod hotkey;
 mod managers;
 mod paths;
 mod setup;
+mod web;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands, ConfigCommands, HistoryCommands, ModelCommands};
+use cli::{AutostartCommands, Cli, Commands, ConfigCommands, HistoryCommands, ModelCommands};
 use config::Config;
 use managers::model::ModelManager;
 use std::sync::{Arc, Mutex};
@@ -57,7 +59,35 @@ async fn main() -> Result<()> {
         Some(Commands::Devices) => cmd_devices(),
         Some(Commands::Hotkey { combo, no_paste }) => cmd_hotkey(config, combo, no_paste).await,
         Some(Commands::Setup) => cmd_setup(config).await,
+        Some(Commands::Autostart(autostart_cmd)) => cmd_autostart(autostart_cmd),
     }
+}
+
+fn cmd_autostart(cmd: AutostartCommands) -> Result<()> {
+    match cmd {
+        AutostartCommands::Enable => {
+            autostart::enable()?;
+            println!(
+                "✓ Auto-start on system login enabled ({})",
+                autostart::autostart_file_path()?.display()
+            );
+        }
+        AutostartCommands::Disable => {
+            autostart::disable()?;
+            println!("✓ Auto-start on system login disabled");
+        }
+        AutostartCommands::Status => {
+            if autostart::is_enabled() {
+                println!(
+                    "Auto-start is enabled ({})",
+                    autostart::autostart_file_path()?.display()
+                );
+            } else {
+                println!("Auto-start is disabled");
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -113,10 +143,24 @@ async fn cmd_daemon(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(paths::socket_path);
 
-    let model_manager = build_model_manager(config.clone(), true)?;
+    // Shared map of in-flight model downloads, updated by the progress callback
+    // below and read by the web UI to render progress bars.
+    let download_progress: web::DownloadProgressMap =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let progress_cb: Arc<dyn Fn(managers::model::DownloadProgress) + Send + Sync> = {
+        let download_progress = download_progress.clone();
+        Arc::new(move |p| {
+            download_progress
+                .lock()
+                .unwrap()
+                .insert(p.model_id.clone(), p);
+        })
+    };
+
+    let model_manager = build_model_manager_with_cb(config.clone(), true, Some(progress_cb))?;
     let model_manager = Arc::new(model_manager);
 
-    let result = daemon::run_daemon(socket_path, config, model_manager).await;
+    let result = daemon::run_daemon(socket_path, config, model_manager, download_progress).await;
 
     // Clean up PID file on exit
     let _ = std::fs::remove_file(&pid_path);
