@@ -5,7 +5,7 @@
 <h1>voicr</h1>
 
 <p><strong>Press a key. Speak. Release. Your words appear wherever your cursor is.</strong><br>
-No GUI. Runs entirely on your machine — or via Groq cloud for faster cold-start.</p>
+No GUI. Runs entirely on your machine — or via Groq, OpenAI, Sarvam, or a custom cloud endpoint for faster cold-start.</p>
 
 [![Release](https://img.shields.io/github/v/release/habitual69/voicr?style=flat-square&color=4a90d9)](https://github.com/habitual69/voicr/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -24,7 +24,11 @@ No GUI. Runs entirely on your machine — or via Groq cloud for faster cold-star
 
 ## Why voicr?
 
-Most speech-to-text tools are either a cloud service (sends your audio to someone's server) or a GUI app (heavy, mouse-driven, not scriptable). voicr is neither.
+Most voice-to-text tools on the market are either a polished but closed, cloud-only, subscription product ([Wispr Flow](https://wisprflow.ai)), or an open, hybrid local/cloud tool wrapped in a full Electron desktop app ([OpenWhispr](https://github.com/OpenWhispr/openwhispr)). voicr takes a different shape entirely: **no GUI app at all**. It's a single static binary that runs as a background daemon — no Electron, no menu bar icon, no window to manage.
+
+It's built by a developer, for developers who want a tool that gets out of the way. Set it up once — pick a local model or a cloud provider (Groq, OpenAI, Sarvam, or your own OpenAI-compatible endpoint) — and forget it exists. From then on it's just a hotkey: hold it, talk, release, and the words land wherever your cursor already is — terminal, editor, browser, anywhere.
+
+The optional configuration UI is a tiny page served directly by the daemon itself (`http://127.0.0.1:7898`) — open it in any browser only when you need to change a setting; it adds no runtime overhead when you don't.
 
 It runs as a **background daemon** you control with a hotkey or a Unix socket. Hold `Ctrl+Space`, speak, release — the transcription is pasted directly into whatever window is focused. No switching apps. No clicking. Just talk.
 
@@ -32,7 +36,7 @@ It runs as a **background daemon** you control with a hotkey or a Unix socket. H
 Hold Ctrl+Space → speak → release → text appears in your editor / terminal / browser
 ```
 
-Run **fully offline** with a local model, or add `--cloud` to route transcription through the Groq API for near-instant results without downloading any model.
+Run **fully offline** with a local model, or add `--cloud` to route transcription through Groq, OpenAI, Sarvam, or a custom endpoint for near-instant results without downloading any model.
 
 ---
 
@@ -365,9 +369,13 @@ append_trailing_space = false
 combo = "ctrl+space"            # global hotkey combo
 
 [cloud]
-enabled = false                 # use Groq cloud transcription instead of local model
-groq_api_key = ""               # Groq API key (get one free at console.groq.com)
-groq_model = "whisper-large-v3-turbo"  # Groq model to use
+enabled = false                 # use cloud transcription instead of a local model
+provider = "groq"               # groq | openai | sarvam | custom
+model = "whisper-large-v3-turbo"
+groq_api_key = ""               # console.groq.com
+openai_api_key = ""             # platform.openai.com
+sarvam_api_key = ""             # dashboard.sarvam.ai
+custom_api_key = ""             # for a custom OpenAI-compatible endpoint
 ```
 
 ### Common config examples
